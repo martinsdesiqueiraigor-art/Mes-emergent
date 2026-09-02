@@ -1,0 +1,10 @@
+{
+  "name": "profab-mes-frontend-shim",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "/root/.venv/bin/python3 /app/backend/mes_aps.py",
+    "build": "echo 'no build'",
+    "test": "echo 'no tests'"
+  }
+}

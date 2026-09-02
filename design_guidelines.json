@@ -1,0 +1,170 @@
+{
+  "project_name": "ProFab MES/APS - Sistema de Controle de Chão de Fábrica e Planejamento",
+  "language": "pt-BR",
+  "archetype": "INDUSTRIAL_TACTICAL_CONTROL_PANEL",
+  "responsive": {
+    "breakpoint": "mobile-first",
+    "mobile_strategy": "Direct operator interface with 48px+ touch targets, single-column stacked layout, sticky bottom control bar, big visible digital chronometer, one-touch scrap and stoppage reason selectors.",
+    "tablet_strategy": "2-column grid for shop-floor stations. Left side showing active OP drawing/specs and real-time timer, right side for quick piece counter (+1, +5, +10) and stoppage log.",
+    "desktop_strategy": "Supervisors/PCP high-density command center with live machine matrix, validation queue drawer, OEE gauge cards, Pareto stoppage chart, and OP aging table with modals for CRUD actions.",
+    "overflow_guard": "Use max-w-full overflow-x-hidden on container divs, custom horizontal scrolling wrappers for data tables with shadow cues.",
+    "tap_targets": "Minimum 48px height x 48px width for all operator buttons, status toggles, and counter increments."
+  },
+  "typography": {
+    "heading_font": "Chivo, sans-serif",
+    "body_font": "Inter, sans-serif",
+    "mono_font": "'IBM Plex Mono', 'JetBrains Mono', monospace",
+    "font_pairings": "Chivo for section titles & card headings, IBM Plex Mono for numeric values (timers, piece counters, OEE percentages, OP numbers), Inter for body descriptions and table data.",
+    "type_scale": {
+      "h1_hero": "text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight",
+      "h2_section": "text-xl sm:text-2xl lg:text-3xl font-bold tracking-tight",
+      "h3_card": "text-lg sm:text-xl font-semibold",
+      "timer_display": "text-4xl sm:text-6xl lg:text-7xl font-mono font-black tracking-widest tabular-nums",
+      "counter_display": "text-3xl sm:text-5xl font-mono font-bold tabular-nums",
+      "metric_label": "text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400",
+      "body": "text-sm sm:text-base leading-relaxed",
+      "badge": "text-xs font-bold uppercase tracking-wide px-2.5 py-1 rounded-md"
+    }
+  },
+  "colors": {
+    "theme_mode": "dual_mode_industrial (light industrial base default, dark tactical toggle available)",
+    "palette": {
+      "background_light": "#F8FAFC",
+      "surface_light": "#FFFFFF",
+      "border_light": "#E2E8F0",
+      "background_dark": "#0B0F17",
+      "surface_dark": "#151C2C",
+      "border_dark": "#2A344A",
+      "primary": "#0F172A",
+      "primary_foreground": "#FFFFFF",
+      "status_em_andamento": {
+        "bg": "#ECFDF5",
+        "border": "#A7F3D0",
+        "text": "#047857",
+        "badge_bg": "#10B981",
+        "badge_text": "#FFFFFF",
+        "label": "Em Andamento"
+      },
+      "status_pausado": {
+        "bg": "#FFFBEB",
+        "border": "#FDE68A",
+        "text": "#B45309",
+        "badge_bg": "#F59E0B",
+        "badge_text": "#FFFFFF",
+        "label": "Parado / Pausado"
+      },
+      "status_atrasado": {
+        "bg": "#FEF2F2",
+        "border": "#FECACA",
+        "text": "#B91C1C",
+        "badge_bg": "#EF4444",
+        "badge_text": "#FFFFFF",
+        "label": "Atrasado / Gargalo"
+      },
+      "status_pendente_aprovacao": {
+        "bg": "#EEF2FF",
+        "border": "#C7D2FE",
+        "text": "#4338CA",
+        "badge_bg": "#6366F1",
+        "badge_text": "#FFFFFF",
+        "label": "Pendente Aprovacao"
+      },
+      "status_concluido": {
+        "bg": "#F1F5F9",
+        "border": "#CBD5E1",
+        "text": "#334155",
+        "badge_bg": "#64748B",
+        "badge_text": "#FFFFFF",
+        "label": "Concluido"
+      }
+    },
+    "contrast_rules": "Status badges must use high-contrast solid backgrounds with white text or deep tinted background with dark text (min 4.5:1 ratio). Numeric counters use dark slate or bright emerald for high visibility across factory floor light conditions."
+  },
+  "visual_enhancers": {
+    "card_style": "Industrial card with 1px border (#E2E8F0 / #2A344A), rounded-lg corners, zero harsh gloss, micro shadow-sm on hover.",
+    "timer_box": "High-contrast digital readout container with subtle grid texture background, glow ring when active (#10B981 pulse), dark background box with neon emerald numbers for maximum distance glanceability.",
+    "modal_style": "Shadcn Dialog overlay with clean header, explicit form fields, tabbed validation views for supervisor approval, and sticky footer action buttons.",
+    "toast_style": "Sonner toasts anchored to top-right/bottom-right for supervisor alerts when new OPs enter 'Pendente Aprovação' or when a line stoppage is reported."
+  },
+  "key_components": [
+    {
+      "name": "Header & Mode Switcher",
+      "purpose": "Displays company logo, system status (Online / Off-line LAN), active shop floor shift info, pending approvals badge counter, view toggle (Operador vs Supervisor), and theme switch.",
+      "data_testid": "main-header"
+    },
+    {
+      "name": "Operador View - Chronometer & Production Logger",
+      "purpose": "Tablet-optimized view for shop-floor operators. OP selector dropdown/card, big live chronometer (Start/Pause/Resume/Finish), counter (+1, +5, +10, -1) for produced good pieces, scrap count input with reason tag, and 1-click stoppage reason selector (e.g. Falha Mecânica, Falta de Matéria-Prima, Troca de Ferramenta).",
+      "data_testid": "operator-view-container"
+    },
+    {
+      "name": "Supervisor Live Floor Matrix",
+      "purpose": "Grid of machine cards (Torno CNC 01, Centro de Usinagem 02, Prensa Hidráulica, Corte Laser, etc.) showing active OP, assigned operator avatar & name, live timer, pieces produced vs goal progress bar, and real-time status light.",
+      "data_testid": "supervisor-live-matrix"
+    },
+    {
+      "name": "Validation Queue (Pendente de Aprovação)",
+      "purpose": "List/Drawer of reports submitted by operators awaiting supervisor validation. Quick approve / edit / reject actions with modal detail review.",
+      "data_testid": "validation-queue-section"
+    },
+    {
+      "name": "OEE Analytics Dashboard",
+      "purpose": "OEE overall gauge card + breakdown into Availability (Disponibilidade), Performance (Desempenho), and Quality (Qualidade). Filterable by machine, shift, operator, and date range.",
+      "data_testid": "oee-analytics-card"
+    },
+    {
+      "name": "Pareto Stoppage Chart (Gráfico de Pareto - Paradas)",
+      "purpose": "Recharts combination of Bar Chart (hours lost per stoppage reason) and Line Chart (cumulative percentage line) to highlight top bottleneck causes.",
+      "data_testid": "pareto-stoppage-chart"
+    },
+    {
+      "name": "OP Aging & Delivery Schedule (Aging de Ordens de Produção)",
+      "purpose": "Table and timeline showing OPs sorted by status and delivery lead time, highlighting overdue OPs (>24h delay in red badge) and pending items.",
+      "data_testid": "op-aging-table"
+    },
+    {
+      "name": "Operator Productivity Matrix",
+      "purpose": "Performance table displaying pieces/hour, % scrap, % downtime, and total shift uptime per operator.",
+      "data_testid": "operator-productivity-table"
+    },
+    {
+      "name": "CRUD Modals (Cadastros Básicos)",
+      "purpose": "Modals for Supervisor to manage Operators (Operadores), Machines (Máquinas), Technical Drawings (Desenhos com Anexo PDF/Imagem), and Production Orders (OPs).",
+      "data_testid": "crud-modal-trigger"
+    }
+  ],
+  "image_urls": {
+    "factory_lathe": {
+      "url": "https://images.unsplash.com/photo-1764114441123-586d13fc6ece?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHwyfHxmYWN0b3J5JTIwQ05DJTIwbWFjaGluZSUyMGluZHVzdHJpYWwlMjBzaG9wJTIwZmxvb3J8ZW58MHx8fHwxNzg4MzM5NDUzfDA&ixlib=rb-4.1.0&q=85",
+      "description": "Oficina industrial com torno CNC e aparas de usinagem.",
+      "usage": "Background/Header banner for CNC machine detail card or Technical Drawing preview modal."
+    },
+    "factory_operators": {
+      "url": "https://images.unsplash.com/photo-1764114909312-c27b89ec7223?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHwxfHxmYWN0b3J5JTIwQ05DJTIwbWFjaGluZSUyMGluZHVzdHJpYWwlMjBzaG9wJTIwZmxvb3J8ZW58MHx8fHwxNzg4MzM5NDUzfDA&ixlib=rb-4.1.0&q=85",
+      "description": "Operadores alinhados executando rotina em máquina industrial.",
+      "usage": "Hero banner for Supervisor Dashboard or Operator Onboarding banner."
+    },
+    "lathe_close_up": {
+      "url": "https://images.unsplash.com/photo-1764114440403-4dd539cb582a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHwzfHxmYWN0b3J5JTIwQ05DJTIwbWFjaGluZSUyMGluZHVzdHJpYWwlMjBzaG9wJTIwZmxvb3J8ZW58MHx8fHwxNzg4MzM5NDUzfDA&ixlib=rb-4.1.0&q=85",
+      "description": "Detalhe de placa e cabeçote de máquina ferramenta.",
+      "usage": "Drawing/Drawing Spec attachments placeholder image."
+    },
+    "operator_working": {
+      "url": "https://images.unsplash.com/photo-1576666735112-87a8ea71671c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2Mzl8MHwxfHNlYXJjaHw0fHxmYWN0b3J5JTIwQ05DJTIwbWFjaGluZSUyMGluZHVzdHJpYWwlMjBzaG9wJTIwZmxvb3J8ZW58MHx8fHwxNzg4MzM5NDUzfDA&ixlib=rb-4.1.0&q=85",
+      "description": "Operador de produção verificado.",
+      "usage": "Avatar / profile badge for active operator profile."
+    }
+  },
+  "instructions_to_main_agent": [
+    "1. IMPLEMENTATION PHASES: Ensure both 'Visão do Operador (Chão de Fábrica)' and 'Visão do Supervisor / PCP' are fully navigable via top tabs or mode toggle.",
+    "2. CHRONOMETER ENGINE: In Operador View, build a robust functional JS timer (useEffect + setInterval) with Start (Iniciar), Pause (Pausar), Resume (Retomar), and Finish (Finalizar Apontamento). Show live time formatted as HH:MM:SS in large monospace numbers.",
+    "3. PIECE COUNTERS: Operadores need big touchable (+1, +5, +10, -1) buttons for produced good pieces (Peças Boas) and a dedicated modal/input for Refugo (Scrap) with reason selector (ex: Defeito Usinagem, Riscado, Fora de Tolerância).",
+    "4. STOPPAGE TRACKING (Paradas): Include 1-click stoppage buttons with presets (Manutenção Corretiva, Falta de Material, Setup/Troca Ferramenta, Aguardando Inspeção PCP, Queda de Energia). Activating a stoppage changes timer state to Amber and tracks downtime duration.",
+    "5. SUPERVISOR DASHBOARD: Display real-time KPI summary bar (OPs Ativas, OEE Médio, Eficiência de Peças, OPs Atrasadas, Pendências Supervisor).",
+    "6. CHARTS WITH RECHARTS: Build Pareto Chart (ComposedChart with Bar for hours lost + Line for cumulative %) and OEE Radial / Gauge or Bar breakdown charts.",
+    "7. MODALS FOR SUPERVISOR CRUD: Inline forms must be replaced with Shadcn Dialog Modals for creating/editing Operators, Machines, Drawings (Desenhos), and OPs. Include filter bars (periodo, maquina, operador, cliente, OP).",
+    "8. NOTIFICATIONS & TOASTS: Use Sonner toast alerts when supervisor approves/rejects an apontamento, or when a high-priority stoppage is registered on the floor.",
+    "9. EXPORT & SEARCH: Add CSV/Excel download export simulation button for production reports and filtering across tables.",
+    "10. ALL INTERACTIVE ELEMENTS MUST HAVE data-testid ATTRIBUTES (e.g. data-testid='start-timer-btn', data-testid='inc-piece-btn', data-testid='stoppage-reason-btn', data-testid='op-filter-select', data-testid='modal-add-op-btn')."
+  ]
+}
