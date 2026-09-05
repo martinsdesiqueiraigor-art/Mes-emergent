@@ -159,22 +159,58 @@ def log_audit(acao, entidade, entidade_id="", detalhes=""):
 # ============================================
 
 def _ensure_upgrades():
-    """Aplica upgrades idempotentes ao banco: WAL + tabela de auditoria."""
+    """Aplica upgrades idempotentes ao banco: WAL + auditoria + Fase 2/3/4."""
     try:
         with sqlite3.connect(DB_NAME, timeout=15) as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("""CREATE TABLE IF NOT EXISTS audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                usuario TEXT,
-                acao TEXT,
-                entidade TEXT,
-                entidade_id TEXT,
-                detalhes TEXT,
-                data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                usuario TEXT, acao TEXT, entidade TEXT, entidade_id TEXT,
+                detalhes TEXT, data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS configuracoes (
+                chave TEXT PRIMARY KEY, valor TEXT
+            )""")
+            # defaults
+            for k, v in [("shift_end_time", "22:00"),
+                         ("min_stoppage_comment_min", "15"),
+                         ("oee_target_default", "0.75"),
+                         ("backup_retention_days", "30")]:
+                conn.execute("INSERT OR IGNORE INTO configuracoes (chave, valor) VALUES (?, ?)", (k, v))
+            # colunas novas em apontamentos
+            for coldef in [
+                ("justificativa_sucata", "TEXT"),
+                ("status_aprovacao", "TEXT DEFAULT 'ok'"),
+                ("auto_fechado", "INTEGER DEFAULT 0"),
+                ("aprovador", "TEXT"),
+                ("data_hora_aprovacao", "TIMESTAMP"),
+                ("nota_aprovacao", "TEXT"),
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE apontamentos ADD COLUMN {coldef[0]} {coldef[1]}")
+                except sqlite3.OperationalError:
+                    pass
+            # coluna nova em operadores (papel)
+            try:
+                conn.execute("ALTER TABLE operadores ADD COLUMN papel TEXT DEFAULT 'operador'")
+            except sqlite3.OperationalError:
+                pass
+            # comentario em paradas
+            try:
+                conn.execute("ALTER TABLE paradas_maquina ADD COLUMN comentario TEXT")
+            except sqlite3.OperationalError:
+                pass
             conn.commit()
     except Exception as e:
         print(f"[upgrade] {e}")
+
+def get_config(chave, default=None):
+    r = query("SELECT valor FROM configuracoes WHERE chave = ?", (chave,), one=True)
+    return r['valor'] if r else default
+
+def set_config(chave, valor):
+    query("INSERT INTO configuracoes (chave, valor) VALUES (?, ?) ON CONFLICT(chave) DO UPDATE SET valor=excluded.valor",
+          (chave, str(valor)), commit=True)
 
 def init_db():
     """Inicializa o banco de dados apenas se não existir"""
@@ -697,6 +733,9 @@ BASE_TEMPLATE = """
             <a href="/operador" class="{% if aba == 'operador' %}active{% endif %}">🧑‍🔧 OP</a>
             <a href="/pcp" class="{% if aba == 'pcp' %}active{% endif %}">📋 PCP</a>
             <a href="/supervisor" class="{% if aba == 'supervisor' %}active{% endif %}">👮 SUP</a>
+            <a href="/supervisor/fila" class="{% if aba == 'fila' %}active{% endif %}">✅ Fila</a>
+            <a href="/supervisor/relatorios" class="{% if aba == 'rel' %}active{% endif %}">📊 Relat.</a>
+            <a href="/supervisor/saude" class="{% if aba == 'saude' %}active{% endif %}">❤️ Saúde</a>
         </div>
         
         {% with messages = get_flashed_messages(with_categories=true) %}
@@ -722,6 +761,24 @@ BASE_TEMPLATE = """
                 menu.classList.remove('active');
             }
         });
+
+        // Cronômetro visível (Fase 2)
+        function updateChronos() {
+            document.querySelectorAll('.crono').forEach(function(el){
+                var s = el.dataset.start;
+                if(!s) return;
+                var iso = s.replace(' ', 'T') + 'Z';
+                var t0 = new Date(iso).getTime();
+                if(isNaN(t0)) return;
+                var diff = Math.max(0, Math.floor((Date.now() - t0)/1000));
+                var h = String(Math.floor(diff/3600)).padStart(2,'0');
+                var m = String(Math.floor((diff%3600)/60)).padStart(2,'0');
+                var sec = String(diff%60).padStart(2,'0');
+                el.textContent = h+':'+m+':'+sec;
+            });
+        }
+        setInterval(updateChronos, 1000);
+        updateChronos();
     </script>
 </body>
 </html>
@@ -807,8 +864,9 @@ OPERADOR_TEMPLATE = """
                         <strong>{{ op.num_op }}</strong> - Etapa {{ op.numero_etapa }}
                         <div style="font-size:11px;color:#78909c;">Máquina: {{ op.codigo_maquina }}</div>
                         <div style="font-size:11px;color:#78909c;">Início: {{ op.data_hora_inicio[11:16] if op.data_hora_inicio else '--:--' }}</div>
+                        <div style="margin-top:6px;font-family:'Courier New',monospace;font-size:22px;font-weight:bold;color:#10B981;text-shadow:0 0 8px rgba(16,185,129,.4);" class="crono" data-start="{{ op.data_hora_inicio }}">00:00:00</div>
                     </div>
-                    <button onclick="document.getElementById('fechar-form-{{ op.id }}').style.display='block'" 
+                    <button data-testid="btn-abrir-fechar-{{ op.id }}" onclick="document.getElementById('fechar-form-{{ op.id }}').style.display='block'" 
                             class="btn btn-sm btn-primary">📦 Fechar</button>
                 </div>
                 
@@ -824,6 +882,10 @@ OPERADOR_TEMPLATE = """
                                 <label>❌ Refugo</label>
                                 <input type="number" name="refugo" value="0" min="0" placeholder="0">
                             </div>
+                        </div>
+                        <div class="form-group">
+                            <label style="font-size:11px;color:#f59e0b;">📝 Justificativa (obrigatória se refugo > saldo)</label>
+                            <textarea name="justificativa_sucata" rows="2" placeholder="Ex: Material fora de tolerância recebido do fornecedor" style="width:100%;background:#0d1b2a;color:#fff;border:1px solid #1a2a3a;padding:8px;border-radius:4px;font-size:12px;"></textarea>
                         </div>
                         <div style="display:flex;gap:6px;margin-top:6px;">
                             <button type="submit" class="btn btn-sm btn-success" style="flex:1;">✅ Confirmar</button>
@@ -1595,9 +1657,24 @@ def operador_fechar():
     if qtd_boas > saldo['saldo_residual']:
         qtd_boas = saldo['saldo_residual']
         flash(f'⚠️ Quantidade ajustada para o saldo disponível: {qtd_boas} peças', 'warning')
+
+    # Fase 2: sucata > saldo residual exige justificativa e vai para aprovação
+    justificativa = request.form.get('justificativa_sucata', '').strip()
+    aprovacao = 'ok'
+    if refugo > saldo['saldo_residual']:
+        if not justificativa:
+            flash('⚠️ Refugo acima do saldo residual: justificativa obrigatória.', 'danger')
+            return redirect(url_for('operador'))
+        aprovacao = 'pendente'
+        flash('⏳ Refugo enviado para aprovação do supervisor.', 'warning')
     
-    query("UPDATE apontamentos SET qtd_boas = ?, refugo = ?, data_hora_fim = CURRENT_TIMESTAMP WHERE id = ?", (qtd_boas, refugo, id_apontamento), commit=True)
-    query("UPDATE op_etapas_execucao SET saldo_residual = saldo_residual - ? WHERE num_op = ? AND numero_etapa = ?", (qtd_boas, apont['num_op'], apont['numero_etapa']), commit=True)
+    query("""UPDATE apontamentos SET qtd_boas = ?, refugo = ?, data_hora_fim = CURRENT_TIMESTAMP,
+             justificativa_sucata = ?, status_aprovacao = ? WHERE id = ?""",
+          (qtd_boas, refugo, justificativa or None, aprovacao, id_apontamento), commit=True)
+    log_audit('fechar', 'apontamento', id_apontamento, f'boas={qtd_boas} refugo={refugo} aprov={aprovacao}')
+    # Só desconta saldo se não estiver pendente de aprovação
+    if aprovacao == 'ok':
+        query("UPDATE op_etapas_execucao SET saldo_residual = saldo_residual - ? WHERE num_op = ? AND numero_etapa = ?", (qtd_boas, apont['num_op'], apont['numero_etapa']), commit=True)
     
     saldo_novo = query("SELECT saldo_residual FROM op_etapas_execucao WHERE num_op = ? AND numero_etapa = ?", (apont['num_op'], apont['numero_etapa']), one=True)
     if saldo_novo and saldo_novo['saldo_residual'] <= 0:
@@ -2112,6 +2189,336 @@ def relatorio_csv_op(num_op):
 # ============================================
 # MAIN
 # ============================================
+
+# ============================================
+# FASE 2/3/4 — NOVAS ROTAS (fila validação, painel saúde, relatórios, modais)
+# ============================================
+
+def _supervisor_only():
+    return session.get('matricula') and query(
+        "SELECT papel FROM operadores WHERE matricula = ?", (session['matricula'],), one=True
+    )
+
+FASE_TEMPLATE_BASE = """
+<style>
+.metric{background:#0d1b2a;border:1px solid #1a2a3a;padding:14px;border-radius:8px;text-align:center;flex:1;min-width:120px}
+.metric .v{font-size:26px;font-weight:900;color:#4fc3f7;font-family:'Courier New',monospace}
+.metric .l{font-size:10px;color:#78909c;text-transform:uppercase;letter-spacing:1px;margin-top:4px}
+.metric.warn .v{color:#f59e0b}
+.metric.danger .v{color:#ef4444}
+.metric.ok .v{color:#10b981}
+.row-flex{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+table.rep{width:100%;border-collapse:collapse;font-size:12px}
+table.rep th,table.rep td{padding:8px;border-bottom:1px solid #1a2a3a;text-align:left}
+table.rep th{background:#0d1b2a;color:#4fc3f7;text-transform:uppercase;font-size:10px;letter-spacing:1px}
+.bar{background:#0d1b2a;height:20px;border-radius:4px;overflow:hidden;position:relative}
+.bar>span{display:block;height:100%;background:linear-gradient(90deg,#10b981,#4fc3f7);transition:width .3s}
+.badge{padding:3px 8px;border-radius:4px;font-size:10px;font-weight:bold;text-transform:uppercase}
+.b-ok{background:#065f46;color:#a7f3d0}.b-pend{background:#4338ca;color:#c7d2fe}.b-late{background:#7f1d1d;color:#fecaca}
+.filter-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.filter-row input,.filter-row select{background:#0d1b2a;color:#fff;border:1px solid #1a2a3a;padding:8px;border-radius:4px;font-size:12px;flex:1;min-width:120px}
+</style>
+"""
+
+FILA_TEMPLATE = FASE_TEMPLATE_BASE + """
+<div class="card"><h3>✅ Fila de Validação (Fase 2)</h3>
+<p style="font-size:11px;color:#78909c;margin-bottom:10px;">Apontamentos com refugo acima do saldo ou fechados automaticamente no fim de turno.</p>
+<form method="POST" action="/supervisor/auto-close" style="margin-bottom:14px;">
+  <button type="submit" data-testid="btn-auto-close" class="btn btn-sm btn-warning">🌙 Executar Fechamento Automático (fim de turno)</button>
+</form>
+<table class="rep">
+<tr><th>OP</th><th>Etapa</th><th>Operador</th><th>Boas</th><th>Refugo</th><th>Justificativa</th><th>Auto?</th><th>Ações</th></tr>
+{% for a in pendentes %}
+<tr>
+  <td>{{ a.num_op }}</td><td>{{ a.numero_etapa }}</td><td>{{ a.operador }}</td>
+  <td>{{ a.qtd_boas or 0 }}</td><td>{{ a.refugo or 0 }}</td>
+  <td style="max-width:200px;font-size:11px;">{{ a.justificativa_sucata or '-' }}</td>
+  <td>{% if a.auto_fechado %}<span class="badge b-pend">Auto</span>{% else %}-{% endif %}</td>
+  <td>
+    <form method="POST" action="/supervisor/aprovar/{{ a.id }}" style="display:inline;">
+      <input type="hidden" name="decisao" value="aprovar">
+      <button class="btn btn-sm btn-success" data-testid="btn-aprovar-{{ a.id }}">✔️</button>
+    </form>
+    <form method="POST" action="/supervisor/aprovar/{{ a.id }}" style="display:inline;">
+      <input type="hidden" name="decisao" value="rejeitar">
+      <button class="btn btn-sm btn-danger" data-testid="btn-rejeitar-{{ a.id }}">✖️</button>
+    </form>
+  </td>
+</tr>
+{% else %}<tr><td colspan="8" style="text-align:center;color:#78909c;padding:20px;">Nenhum item pendente 🎉</td></tr>{% endfor %}
+</table></div>
+"""
+
+SAUDE_TEMPLATE = FASE_TEMPLATE_BASE + """
+<div class="card"><h3>❤️ Painel de Saúde do Sistema</h3>
+<div class="row-flex">
+  <div class="metric ok"><div class="v">{{ tam_db_mb }}</div><div class="l">Tamanho DB (MB)</div></div>
+  <div class="metric"><div class="v">{{ apontamentos_abertos }}</div><div class="l">Apontamentos Abertos</div></div>
+  <div class="metric warn"><div class="v">{{ pendentes_aprov }}</div><div class="l">Pendentes Aprovação</div></div>
+  <div class="metric"><div class="v" style="font-size:14px;">{{ ultimo_backup or '—' }}</div><div class="l">Último Backup</div></div>
+  <div class="metric"><div class="v">{{ qtd_backups }}</div><div class="l">Total Backups</div></div>
+</div>
+<h4>⚙️ Configurações</h4>
+<form method="POST" action="/supervisor/saude/config" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+  <label style="font-size:11px;">Fim de turno<input name="shift_end_time" value="{{ shift_end_time }}" data-testid="cfg-shift"></label>
+  <label style="font-size:11px;">Comentário parada ≥ (min)<input name="min_stoppage_comment_min" type="number" value="{{ min_stop_min }}" data-testid="cfg-stop-min"></label>
+  <label style="font-size:11px;">OEE Meta padrão<input name="oee_target_default" type="number" step="0.01" value="{{ oee_target }}" data-testid="cfg-oee"></label>
+  <label style="font-size:11px;">Retenção backup (dias)<input name="backup_retention_days" type="number" value="{{ retencao }}" data-testid="cfg-retencao"></label>
+  <button type="submit" class="btn btn-sm btn-primary" style="grid-column:span 2;" data-testid="btn-salvar-config">💾 Salvar Configurações</button>
+</form></div>
+"""
+
+RELATORIOS_TEMPLATE = FASE_TEMPLATE_BASE + """
+<div class="card"><h3>📊 Relatórios (Fase 3)</h3>
+<form method="GET" action="/supervisor/relatorios" class="filter-row">
+  <input type="date" name="date_from" value="{{ date_from or '' }}" data-testid="filter-date-from">
+  <input type="date" name="date_to" value="{{ date_to or '' }}" data-testid="filter-date-to">
+  <select name="machine" data-testid="filter-machine"><option value="">Todas máquinas</option>
+    {% for m in maquinas %}<option value="{{ m.codigo_maquina }}" {% if m.codigo_maquina==machine %}selected{% endif %}>{{ m.codigo_maquina }} - {{ m.descricao }}</option>{% endfor %}
+  </select>
+  <button class="btn btn-sm btn-primary" data-testid="btn-filtrar">Filtrar</button>
+  <a class="btn btn-sm btn-success" href="/relatorio/csv/mes" data-testid="btn-export-csv">⬇ CSV</a>
+</form>
+<h4>🎯 OEE por Máquina</h4>
+<table class="rep">
+<tr><th>Máquina</th><th>Disponib.</th><th>Perform.</th><th>Qualidade</th><th>OEE</th></tr>
+{% for r in oee %}<tr>
+  <td>{{ r.maquina }}</td><td>{{ r.availability }}%</td><td>{{ r.performance }}%</td>
+  <td>{{ r.quality }}%</td>
+  <td><div class="bar"><span style="width:{{ r.oee }}%"></span></div><small style="font-family:monospace">{{ r.oee }}%</small></td>
+</tr>{% else %}<tr><td colspan="5" style="text-align:center;color:#78909c;">Sem dados</td></tr>{% endfor %}
+</table>
+<h4 style="margin-top:20px;">⏱️ Pareto de Paradas</h4>
+<table class="rep">
+<tr><th>Motivo</th><th>Min. Perdidos</th><th>% Isolado</th><th>% Acumulado</th></tr>
+{% for p in pareto %}<tr>
+  <td>{{ p.motivo }}</td><td>{{ p.minutos }}</td>
+  <td><div class="bar"><span style="width:{{ p.pct }}%"></span></div><small>{{ p.pct }}%</small></td>
+  <td>{{ p.cumulativa }}%</td>
+</tr>{% else %}<tr><td colspan="4" style="text-align:center;color:#78909c;">Sem paradas registradas</td></tr>{% endfor %}
+</table>
+<h4 style="margin-top:20px;">📅 Aging de OPs</h4>
+<table class="rep">
+<tr><th>OP</th><th>Desenho</th><th>Status</th><th>Dias Aberta</th><th>Meta</th><th>Saldo</th><th>%</th></tr>
+{% for a in aging %}<tr>
+  <td>{{ a.num_op }}</td><td>{{ a.numero_desenho }}</td>
+  <td><span class="badge {% if a.overdue %}b-late{% else %}b-ok{% endif %}">{{ a.status_geral }}</span></td>
+  <td style="{% if a.overdue %}color:#ef4444;font-weight:bold;{% endif %}">{{ a.age }}</td>
+  <td>{{ a.meta_total }}</td><td>{{ a.saldo }}</td>
+  <td><div class="bar"><span style="width:{{ a.pct }}%"></span></div></td>
+</tr>{% else %}<tr><td colspan="7" style="text-align:center;color:#78909c;">Sem OPs abertas</td></tr>{% endfor %}
+</table>
+<h4 style="margin-top:20px;">👷 Produtividade por Operador</h4>
+<table class="rep">
+<tr><th>Operador</th><th>Boas</th><th>Refugo</th><th>% Refugo</th><th>Peças/h</th></tr>
+{% for p in produtividade %}<tr>
+  <td>{{ p.nome }}</td><td>{{ p.boas }}</td><td>{{ p.refugo }}</td>
+  <td>{{ p.pct_refugo }}%</td><td>{{ p.pph }}</td>
+</tr>{% else %}<tr><td colspan="5" style="text-align:center;color:#78909c;">Sem dados</td></tr>{% endfor %}
+</table></div>
+"""
+
+@app.route('/supervisor/fila')
+@login_required
+def supervisor_fila():
+    pendentes = query("""SELECT * FROM apontamentos
+        WHERE status_aprovacao = 'pendente' OR auto_fechado = 1
+        ORDER BY data_hora_fim DESC LIMIT 200""") or []
+    return render_template_string(BASE_TEMPLATE,
+        conteudo=render_template_string(FILA_TEMPLATE, pendentes=pendentes),
+        aba='fila', session=session)
+
+@app.route('/supervisor/aprovar/<int:aid>', methods=['POST'])
+@login_required
+def supervisor_aprovar(aid):
+    decisao = request.form.get('decisao', 'aprovar')
+    apont = query("SELECT * FROM apontamentos WHERE id = ?", (aid,), one=True)
+    if not apont:
+        flash('Apontamento não encontrado', 'danger'); return redirect(url_for('supervisor_fila'))
+    novo_status = 'aprovado' if decisao == 'aprovar' else 'rejeitado'
+    query("""UPDATE apontamentos SET status_aprovacao = ?, aprovador = ?, data_hora_aprovacao = CURRENT_TIMESTAMP
+             WHERE id = ?""", (novo_status, session.get('matricula'), aid), commit=True)
+    # Se aprovou, aplica o desconto no saldo residual
+    if decisao == 'aprovar' and apont['qtd_boas']:
+        query("UPDATE op_etapas_execucao SET saldo_residual = MAX(0, saldo_residual - ?) WHERE num_op = ? AND numero_etapa = ?",
+              (apont['qtd_boas'], apont['num_op'], apont['numero_etapa']), commit=True)
+    log_audit(f'aprovacao_{decisao}', 'apontamento', aid)
+    flash(f'✅ Apontamento {decisao}do.', 'success')
+    return redirect(url_for('supervisor_fila'))
+
+@app.route('/supervisor/auto-close', methods=['POST'])
+@login_required
+def supervisor_auto_close():
+    abertos = query("SELECT id FROM apontamentos WHERE qtd_boas IS NULL AND status = 'Ativo'") or []
+    for a in abertos:
+        query("""UPDATE apontamentos SET data_hora_fim = CURRENT_TIMESTAMP, status_aprovacao = 'pendente',
+                 auto_fechado = 1, qtd_boas = 0, refugo = 0 WHERE id = ?""", (a['id'],), commit=True)
+        log_audit('auto_close', 'apontamento', a['id'])
+    flash(f'🌙 {len(abertos)} apontamento(s) fechados automaticamente.', 'success')
+    return redirect(url_for('supervisor_fila'))
+
+@app.route('/supervisor/saude')
+@login_required
+def supervisor_saude():
+    tam = os.path.getsize(DB_NAME) if os.path.exists(DB_NAME) else 0
+    backups = listar_backups()
+    ultimo = backups[0] if backups else None
+    abertos = query("SELECT COUNT(*) as c FROM apontamentos WHERE qtd_boas IS NULL AND status='Ativo'", one=True)
+    pend = query("SELECT COUNT(*) as c FROM apontamentos WHERE status_aprovacao='pendente'", one=True)
+    return render_template_string(BASE_TEMPLATE,
+        conteudo=render_template_string(SAUDE_TEMPLATE,
+            tam_db_mb=round(tam/1024/1024, 2),
+            ultimo_backup=ultimo, qtd_backups=len(backups),
+            apontamentos_abertos=abertos['c'] if abertos else 0,
+            pendentes_aprov=pend['c'] if pend else 0,
+            shift_end_time=get_config('shift_end_time','22:00'),
+            min_stop_min=get_config('min_stoppage_comment_min','15'),
+            oee_target=get_config('oee_target_default','0.75'),
+            retencao=get_config('backup_retention_days','30')),
+        aba='saude', session=session)
+
+@app.route('/supervisor/saude/config', methods=['POST'])
+@login_required
+def supervisor_saude_config():
+    for k in ['shift_end_time','min_stoppage_comment_min','oee_target_default','backup_retention_days']:
+        v = request.form.get(k)
+        if v is not None: set_config(k, v)
+    log_audit('update_config', 'configuracoes', 'global')
+    flash('💾 Configurações salvas.', 'success')
+    return redirect(url_for('supervisor_saude'))
+
+@app.route('/supervisor/relatorios')
+@login_required
+def supervisor_relatorios():
+    date_from = request.args.get('date_from', '')
+    date_to = request.args.get('date_to', '')
+    machine = request.args.get('machine', '')
+    where = ["a.qtd_boas IS NOT NULL", "a.status='Ativo'"]
+    params = []
+    if date_from: where.append("DATE(a.data_hora_inicio) >= ?"); params.append(date_from)
+    if date_to: where.append("DATE(a.data_hora_inicio) <= ?"); params.append(date_to)
+    if machine: where.append("a.codigo_maquina = ?"); params.append(machine)
+    where_sql = " AND ".join(where)
+
+    # OEE por máquina — perf via ciclo padrão dos roteiros
+    oee_rows = query(f"""
+        SELECT a.codigo_maquina as maquina,
+               SUM(a.qtd_boas) as boas, SUM(a.refugo) as refugo,
+               SUM((julianday(a.data_hora_fim)-julianday(a.data_hora_inicio))*86400) as run_s,
+               AVG(COALESCE(r.tempo_ciclo_minutos,1)*60) as ciclo_s
+        FROM apontamentos a
+        LEFT JOIN op_etapas_execucao e ON e.num_op=a.num_op AND e.numero_etapa=a.numero_etapa
+        LEFT JOIN roteiros_padrao r ON r.numero_desenho=(SELECT numero_desenho FROM ordens_producao WHERE num_op=a.num_op)
+             AND r.numero_etapa=a.numero_etapa
+        WHERE {where_sql}
+        GROUP BY a.codigo_maquina""", tuple(params)) or []
+    oee_list = []
+    for r in oee_rows:
+        run_s = r['run_s'] or 0; boas = r['boas'] or 0; refugo = r['refugo'] or 0
+        ciclo = r['ciclo_s'] or 60
+        ideal = (boas + refugo) * ciclo
+        # Paradas do periodo (todos operadores)
+        par = query("SELECT SUM((julianday(COALESCE(data_hora_fim,datetime('now')))-julianday(data_hora_inicio))*86400) as s FROM paradas_maquina WHERE 1=1"
+                    + (" AND DATE(data_hora_inicio) >= ?" if date_from else "")
+                    + (" AND DATE(data_hora_inicio) <= ?" if date_to else ""), tuple([p for p in [date_from, date_to] if p]), one=True)
+        stop_s = par['s'] if par and par['s'] else 0
+        total = run_s + stop_s or 1
+        availability = run_s/total
+        performance = min(1.0, ideal/run_s) if run_s>0 else 0
+        quality = boas/((boas+refugo) or 1)
+        oee_list.append({'maquina': r['maquina'],
+            'availability': round(availability*100,1),
+            'performance': round(performance*100,1),
+            'quality': round(quality*100,1),
+            'oee': round(availability*performance*quality*100,1)})
+
+    # Pareto paradas
+    par_rows = query("""SELECT motivo,
+        SUM((julianday(COALESCE(data_hora_fim,datetime('now')))-julianday(data_hora_inicio))*1440) as min
+        FROM paradas_maquina GROUP BY motivo ORDER BY min DESC""") or []
+    total_p = sum(r['min'] or 0 for r in par_rows) or 1
+    pareto = []; acc = 0
+    for r in par_rows:
+        m = round(r['min'] or 0, 1); acc += m
+        pareto.append({'motivo': r['motivo'] or 'Sem motivo', 'minutos': m,
+                       'pct': round(m/total_p*100,1), 'cumulativa': round(acc/total_p*100,1)})
+
+    # Aging OPs
+    aging_rows = query("""SELECT o.*, COALESCE(SUM(e.saldo_residual),0) as saldo
+        FROM ordens_producao o LEFT JOIN op_etapas_execucao e ON o.num_op=e.num_op
+        WHERE o.status_geral != 'Concluída' GROUP BY o.num_op ORDER BY o.data_criacao""") or []
+    aging = []
+    for o in aging_rows:
+        try: age = (datetime.now().date() - datetime.strptime(o['data_criacao'],'%Y-%m-%d').date()).days
+        except Exception: age = 0
+        pct = 100 - (o['saldo']*100/o['meta_total']) if o['meta_total'] else 0
+        aging.append({'num_op': o['num_op'], 'numero_desenho': o['numero_desenho'],
+                      'status_geral': o['status_geral'], 'age': age, 'meta_total': o['meta_total'],
+                      'saldo': o['saldo'], 'pct': round(pct,1), 'overdue': age > 7})
+
+    # Produtividade por operador
+    prod_rows = query(f"""SELECT a.operador, o.nome,
+        SUM(a.qtd_boas) as boas, SUM(a.refugo) as refugo,
+        SUM((julianday(a.data_hora_fim)-julianday(a.data_hora_inicio))*24) as horas
+        FROM apontamentos a LEFT JOIN operadores o ON o.matricula=a.operador
+        WHERE {where_sql} GROUP BY a.operador""", tuple(params)) or []
+    produtividade = []
+    for r in prod_rows:
+        boas = r['boas'] or 0; refugo = r['refugo'] or 0; horas = r['horas'] or 0.01
+        produtividade.append({'nome': r['nome'] or r['operador'], 'boas': boas, 'refugo': refugo,
+            'pct_refugo': round(refugo/((boas+refugo) or 1)*100,1),
+            'pph': round((boas+refugo)/horas, 1)})
+
+    maquinas = query("SELECT * FROM maquinas ORDER BY codigo_maquina") or []
+    return render_template_string(BASE_TEMPLATE,
+        conteudo=render_template_string(RELATORIOS_TEMPLATE,
+            oee=oee_list, pareto=pareto, aging=aging, produtividade=produtividade,
+            maquinas=maquinas, date_from=date_from, date_to=date_to, machine=machine),
+        aba='rel', session=session)
+
+@app.route('/supervisor/operador/reset/<matricula>', methods=['POST'])
+@login_required
+def supervisor_reset_senha(matricula):
+    nova = request.form.get('nova_senha', '').strip()
+    if len(nova) < 4:
+        flash('❌ Senha deve ter no mínimo 4 caracteres', 'danger')
+        return redirect(url_for('supervisor'))
+    query("UPDATE operadores SET senha = ? WHERE matricula = ?", (gerar_hash_senha(nova), matricula), commit=True)
+    log_audit('reset_senha', 'operador', matricula)
+    flash(f'🔑 Senha do operador {matricula} redefinida.', 'success')
+    return redirect(url_for('supervisor'))
+
+@app.route('/supervisor/operador/excluir/<matricula>', methods=['POST'])
+@login_required
+def supervisor_operador_excluir(matricula):
+    query("UPDATE operadores SET ativo = 0 WHERE matricula = ?", (matricula,), commit=True)
+    log_audit('soft_delete', 'operador', matricula)
+    flash('🗑️ Operador desativado.', 'info')
+    return redirect(url_for('supervisor'))
+
+@app.route('/supervisor/op/cancelar/<num_op>', methods=['POST'])
+@login_required
+def supervisor_op_cancelar(num_op):
+    motivo = request.form.get('motivo','').strip()
+    if not motivo:
+        flash('Justificativa obrigatória.', 'danger'); return redirect(url_for('pcp'))
+    query("UPDATE ordens_producao SET status_geral='Cancelada' WHERE num_op = ?", (num_op,), commit=True)
+    log_audit('cancelar_op', 'ordem', num_op, motivo)
+    flash(f'❌ OP {num_op} cancelada.', 'warning')
+    return redirect(url_for('pcp'))
+
+@app.route('/supervisor/op/reabrir/<num_op>', methods=['POST'])
+@login_required
+def supervisor_op_reabrir(num_op):
+    motivo = request.form.get('motivo','').strip()
+    if not motivo:
+        flash('Justificativa obrigatória.', 'danger'); return redirect(url_for('pcp'))
+    query("UPDATE ordens_producao SET status_geral='Em Andamento' WHERE num_op = ? AND status_geral IN ('Concluída','Cancelada')",
+          (num_op,), commit=True)
+    log_audit('reabrir_op', 'ordem', num_op, motivo)
+    flash(f'🔄 OP {num_op} reaberta.', 'success')
+    return redirect(url_for('pcp'))
+
 
 if __name__ == '__main__':
     print("=" * 60)

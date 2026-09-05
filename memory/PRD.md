@@ -1,59 +1,51 @@
 # ProFab MES/APS — PRD
 
-## Problem statement (verbatim)
-Melhorias no MES/APS (Flask existente) já em produção. Foco: adicionar relatórios, melhorar controle de apontamentos e refinar a área do supervisor, mantendo a stack atual (Flask + SQLite + Jinja).
+## Stack
+Flask + SQLite (WAL) + Jinja2 mono-arquivo (`/app/backend/mes_aps.py`, ~2400 linhas).
+Servido em `0.0.0.0:3000` via supervisor slot `frontend`. DB em `/app/backend/producao.db`.
+Credenciais: `/app/memory/test_credentials.md`.
 
-## Arquitetura atual
-- **Stack:** Flask + SQLite + Jinja2 (mono-arquivo `mes_aps.py`, ~2100 linhas)
-- **Runtime:** Flask servido em `0.0.0.0:3000` via supervisor (slot `frontend`) — porta 8001 (backend FastAPI) não é usada.
-- **DB:** `/app/backend/producao.db` (SQLite com WAL). Backups em `/app/backend/backups/`.
-- **Credenciais demo:** ver `/app/memory/test_credentials.md`.
+## Implementado
 
-## Personas
-- Operador de chão de fábrica (tablet/celular)
-- Supervisor / PCP (desktop e mobile)
+### Fase 1 (2026-02) ✅
+- DEBUG/SECRET_KEY via env, bcrypt com upgrade transparente SHA256, WAL+foreign_keys, tabela `audit_log`, backup no startup.
 
-## Requisitos core (estáticos)
-- Login operador/supervisor, apontamentos com paradas, cadastro de OPs, roteiros, desenhos, máquinas, backup, relatórios CSV.
+### Fase 2 — Controle de apontamentos (2026-02) ✅
+- Coluna `justificativa_sucata`, `status_aprovacao`, `auto_fechado`, `aprovador`, `data_hora_aprovacao` em `apontamentos`.
+- Refugo > saldo residual: bloqueia sem justificativa, marca `pendente` e não desconta saldo até aprovação.
+- Fechamento automático de fim de turno (`POST /supervisor/auto-close`).
+- Cronômetro visível em cada apontamento ativo (JS setInterval, cor emerald).
+- Fila de validação (`/supervisor/fila`) com aprovar/rejeitar por linha; aprovação aplica desconto no saldo.
+- Tabela `configuracoes` (fim de turno, min stoppage min, oee target, retenção backup).
 
-## Implementado (2026-02)
-### Fase 1 — Base técnica ✅
-- `DEBUG` agora vem de env (`FLASK_DEBUG=false` por default)
-- `SECRET_KEY` via env (`SECRET_KEY`); fallback random
-- Senhas migradas para **bcrypt** com **upgrade transparente** de hashes SHA256 legado no primeiro login
-- `PRAGMA journal_mode=WAL` + `foreign_keys=ON` em toda conexão
-- Tabela `audit_log` criada + helper `log_audit()` (login registrado)
-- Backup automático no startup + retenção configurável (`MAX_BACKUPS=30`)
-- Paths absolutos para DB e diretório de backup
+### Fase 3 — Relatórios (2026-02) ✅
+- `/supervisor/relatorios` com filtros date_from/date_to/machine:
+  - **OEE por máquina** (Disponibilidade × Performance × Qualidade)
+  - **Pareto de paradas** com % isolado e cumulativo
+  - **Aging de OPs** com destaque para overdue (>7 dias)
+  - **Produtividade por operador** (peças, refugo, %refugo, peças/h)
+- Exportação CSV mantida do legado.
 
-## Backlog priorizado
-### Fase 2 — Controle de apontamentos (P0)
-- Fechamento automático fim de turno (job + horário configurável)
-- Validação de sucata > saldo com fluxo de aprovação
-- Consolidação de 2+ operadores na mesma operação (soma produção)
-- Fila de pendências de validação (novo endpoint + tela supervisor)
-- Cronômetro visível durante apontamento (JS no template do operador)
-- Comentário obrigatório em paradas ≥15min (configurável)
-- Log de auditoria em todas as ações (não só login)
+### Fase 4 — Supervisor (parcial) 🚧
+- `POST /supervisor/operador/reset/<matricula>` (reset senha)
+- `POST /supervisor/operador/excluir/<matricula>` (soft delete)
+- `POST /supervisor/op/cancelar/<num_op>` (com justificativa)
+- `POST /supervisor/op/reabrir/<num_op>` (com justificativa)
+- Navegação nova (Fila, Relat., Saúde) integrada ao BASE_TEMPLATE.
 
-### Fase 3 — Relatórios (P0)
-- Dashboard supervisor em tempo real (Chart.js)
-- OEE por máquina/turno
-- Produtividade por operador (peças/h, %sucata, %parada)
-- Aging de OPs (dias em aberto vs prazo)
-- Pareto de motivos de parada
-- Filtros: período, máquina, operador, OP, cliente
-- Exportação CSV (já parcial), Excel (openpyxl) e PDF (reportlab)
+### Painel de Saúde ✅
+- `/supervisor/saude`: tamanho DB, apontamentos abertos, pendentes aprovação, último backup, total backups.
+- Formulário de configurações (fim de turno, min stoppage, OEE, retenção backup).
 
-### Fase 4 — Melhorias supervisor (P1)
-- Modais para CRUD (substituir formulários inline)
-- Edição/exclusão soft de operador/máquina/desenho
-- Reset de senha pelo supervisor
-- Busca/filtros/paginação nas listas
-- Backup agendado diário (cron interno) + tela de saúde do sistema
-- Reabrir OP finalizada / Cancelar OP com justificativa
+## Backlog
+### Fase 4 restante (P1)
+- Substituir formulários inline do SUPERVISOR_TEMPLATE por modais Shadcn-style
+- Busca + paginação nas listas grandes (operadores, apontamentos, histórico)
+- Botões edição/reset direto nas listas de mestres
+- Backup agendado diário (cron interno / APScheduler)
 
 ### Fase 5 — Polimento (P2)
-- Toasts para pendências
-- Refinos mobile
+- Toasts JS para pendências novas (poll ou SSE)
+- Refinos mobile finais
 - Manual curto operador/supervisor
+- Exportação Excel/PDF (openpyxl+reportlab já instalados)
