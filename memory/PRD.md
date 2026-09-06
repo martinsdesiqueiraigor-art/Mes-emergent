@@ -1,51 +1,30 @@
 # ProFab MES/APS — PRD
 
 ## Stack
-Flask + SQLite (WAL) + Jinja2 mono-arquivo (`/app/backend/mes_aps.py`, ~2400 linhas).
-Servido em `0.0.0.0:3000` via supervisor slot `frontend`. DB em `/app/backend/producao.db`.
-Credenciais: `/app/memory/test_credentials.md`.
+Flask + SQLite (WAL) + Jinja2 mono-arquivo em `/app/backend/mes_aps.py`. Servido em `0.0.0.0:3000`. DB `/app/backend/producao.db`. Credenciais `/app/memory/test_credentials.md`.
 
 ## Implementado
 
 ### Fase 1 (2026-02) ✅
-- DEBUG/SECRET_KEY via env, bcrypt com upgrade transparente SHA256, WAL+foreign_keys, tabela `audit_log`, backup no startup.
+DEBUG/SECRET_KEY via env, bcrypt com upgrade transparente SHA256, WAL, `audit_log`, backup no startup.
 
-### Fase 2 — Controle de apontamentos (2026-02) ✅
-- Coluna `justificativa_sucata`, `status_aprovacao`, `auto_fechado`, `aprovador`, `data_hora_aprovacao` em `apontamentos`.
-- Refugo > saldo residual: bloqueia sem justificativa, marca `pendente` e não desconta saldo até aprovação.
-- Fechamento automático de fim de turno (`POST /supervisor/auto-close`).
-- Cronômetro visível em cada apontamento ativo (JS setInterval, cor emerald).
-- Fila de validação (`/supervisor/fila`) com aprovar/rejeitar por linha; aprovação aplica desconto no saldo.
-- Tabela `configuracoes` (fim de turno, min stoppage min, oee target, retenção backup).
+### Fase 2 — Apontamentos (2026-02) ✅
+Justificativa obrigatória para refugo > saldo (vai p/ fila `pendente`), cronômetro visível JS, fechamento automático fim de turno, fila de validação em `/supervisor/fila` (aprovar/rejeitar aplica desconto de saldo).
 
 ### Fase 3 — Relatórios (2026-02) ✅
-- `/supervisor/relatorios` com filtros date_from/date_to/machine:
-  - **OEE por máquina** (Disponibilidade × Performance × Qualidade)
-  - **Pareto de paradas** com % isolado e cumulativo
-  - **Aging de OPs** com destaque para overdue (>7 dias)
-  - **Produtividade por operador** (peças, refugo, %refugo, peças/h)
-- Exportação CSV mantida do legado.
+`/supervisor/relatorios` — OEE por máquina, Pareto paradas, Aging OPs, Produtividade por operador, com filtros período+máquina.
 
-### Fase 4 — Supervisor (parcial) 🚧
-- `POST /supervisor/operador/reset/<matricula>` (reset senha)
-- `POST /supervisor/operador/excluir/<matricula>` (soft delete)
-- `POST /supervisor/op/cancelar/<num_op>` (com justificativa)
-- `POST /supervisor/op/reabrir/<num_op>` (com justificativa)
-- Navegação nova (Fila, Relat., Saúde) integrada ao BASE_TEMPLATE.
+### Painel de Saúde (2026-02) ✅
+`/supervisor/saude` — tamanho DB, apontamentos abertos, pendentes aprovação, último backup, config editável.
 
-### Painel de Saúde ✅
-- `/supervisor/saude`: tamanho DB, apontamentos abertos, pendentes aprovação, último backup, total backups.
-- Formulário de configurações (fim de turno, min stoppage, OEE, retenção backup).
+### Fase 4 — Modais + Busca + Paginação (2026-02) ✅
+- `/supervisor/gerenciar` — CRUD de operadores/máquinas/desenhos via modais, busca unificada por nome/código/matrícula, reset de senha em um clique com modal pré-preenchido.
+- `/supervisor/historico` — Lista paginada de apontamentos (25/pág) com filtros por texto, data, status; navegação Anterior/Próxima preservando querystring.
+- Rotas backend: reset senha, soft delete operador, cancelar/reabrir OP com justificativa.
 
 ## Backlog
-### Fase 4 restante (P1)
-- Substituir formulários inline do SUPERVISOR_TEMPLATE por modais Shadcn-style
-- Busca + paginação nas listas grandes (operadores, apontamentos, histórico)
-- Botões edição/reset direto nas listas de mestres
-- Backup agendado diário (cron interno / APScheduler)
-
-### Fase 5 — Polimento (P2)
-- Toasts JS para pendências novas (poll ou SSE)
-- Refinos mobile finais
-- Manual curto operador/supervisor
-- Exportação Excel/PDF (openpyxl+reportlab já instalados)
+- Modais de EDIÇÃO (hoje há add + reset; falta editar campos gerais dos mestres).
+- Backup agendado (APScheduler ou cron).
+- Exportação Excel/PDF (libs instaladas).
+- Toasts de pendências em tempo real (poll ou SSE).
+- Manual curto operador/supervisor.

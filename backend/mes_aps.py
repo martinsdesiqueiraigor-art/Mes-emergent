@@ -736,6 +736,8 @@ BASE_TEMPLATE = """
             <a href="/supervisor/fila" class="{% if aba == 'fila' %}active{% endif %}">✅ Fila</a>
             <a href="/supervisor/relatorios" class="{% if aba == 'rel' %}active{% endif %}">📊 Relat.</a>
             <a href="/supervisor/saude" class="{% if aba == 'saude' %}active{% endif %}">❤️ Saúde</a>
+            <a href="/supervisor/gerenciar" class="{% if aba == 'ger' %}active{% endif %}">⚙️ Gerenciar</a>
+            <a href="/supervisor/historico" class="{% if aba == 'hist' %}active{% endif %}">📚 Histórico</a>
         </div>
         
         {% with messages = get_flashed_messages(with_categories=true) %}
@@ -2518,6 +2520,215 @@ def supervisor_op_reabrir(num_op):
     log_audit('reabrir_op', 'ordem', num_op, motivo)
     flash(f'🔄 OP {num_op} reaberta.', 'success')
     return redirect(url_for('pcp'))
+
+
+# ============================================
+# FASE 4.5 — GERENCIAR (modais) + HISTÓRICO (busca + paginação)
+# ============================================
+
+MODAL_CSS = """
+<style>
+.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:1000;align-items:center;justify-content:center;padding:20px}
+.modal-bg.on{display:flex}
+.modal-box{background:#111927;border:1px solid #1a2a3a;border-radius:12px;padding:22px;max-width:520px;width:100%;max-height:90vh;overflow-y:auto}
+.modal-box h3{color:#4fc3f7;margin-bottom:14px;font-size:16px}
+.modal-close{float:right;background:transparent;border:none;color:#ef4444;font-size:20px;cursor:pointer}
+.list-row{display:flex;align-items:center;justify-content:space-between;padding:10px;background:#0d1b2a;border:1px solid #1a2a3a;border-radius:6px;margin-bottom:6px;gap:8px;flex-wrap:wrap}
+.list-row .info{flex:1;min-width:150px}
+.list-row .info b{color:#fff}
+.list-row .info small{color:#78909c;display:block;font-size:11px}
+.act-btns{display:flex;gap:5px}
+.pagination{display:flex;gap:5px;justify-content:center;margin-top:14px;flex-wrap:wrap}
+.pagination a,.pagination span{padding:6px 10px;background:#1a3a4a;color:#fff;border-radius:4px;text-decoration:none;font-size:12px;font-family:monospace}
+.pagination .cur{background:#2196F3;font-weight:bold}
+</style>
+<script>
+function openM(id){document.getElementById(id).classList.add('on')}
+function closeM(id){document.getElementById(id).classList.remove('on')}
+function fillEdit(id, data){for(var k in data){var el=document.querySelector('#'+id+' [name="'+k+'"]');if(el)el.value=data[k]||''}openM(id)}
+</script>
+"""
+
+GERENCIAR_TEMPLATE = FASE_TEMPLATE_BASE + MODAL_CSS + """
+<div class="card"><h3>⚙️ Gerenciar Cadastros</h3>
+<form method="GET" class="filter-row">
+  <input name="q" value="{{ q }}" placeholder="🔍 Buscar (nome, código, matrícula)" data-testid="ger-search">
+  <button class="btn btn-sm btn-primary" data-testid="btn-search-ger">Buscar</button>
+  <a class="btn btn-sm btn-warning" href="/supervisor/gerenciar" data-testid="btn-clear-ger">✖ Limpar</a>
+</form>
+
+<h4>👥 Operadores <button class="btn btn-sm btn-success" onclick="openM('modalOp')" data-testid="btn-add-op">+ Novo</button></h4>
+{% for o in operadores %}
+<div class="list-row">
+  <div class="info"><b>{{ o.matricula }}</b> — {{ o.nome }} <small>Turno {{ o.turno }} {% if o.papel %}· {{ o.papel }}{% endif %}</small></div>
+  <div class="act-btns">
+    <button class="btn btn-sm btn-warning" data-testid="btn-reset-{{ o.matricula }}"
+      onclick="fillEdit('modalReset',{matricula:'{{ o.matricula }}',nome:'{{ o.nome }}'})">🔑 Reset</button>
+    <form method="POST" action="/supervisor/operador/excluir/{{ o.matricula }}" style="display:inline"
+      onsubmit="return confirm('Desativar {{ o.matricula }}?')">
+      <button class="btn btn-sm btn-danger" data-testid="btn-del-op-{{ o.matricula }}">🗑️</button>
+    </form>
+  </div>
+</div>
+{% else %}<p style="color:#78909c;font-size:12px;">Nenhum operador.</p>{% endfor %}
+
+<h4 style="margin-top:20px;">🏭 Máquinas <button class="btn btn-sm btn-success" onclick="openM('modalMaq')" data-testid="btn-add-maq">+ Nova</button></h4>
+{% for m in maquinas %}
+<div class="list-row">
+  <div class="info"><b>{{ m.codigo_maquina }}</b> — {{ m.descricao }} <small>{{ m.status_operacional }}</small></div>
+</div>
+{% else %}<p style="color:#78909c;font-size:12px;">Nenhuma máquina.</p>{% endfor %}
+
+<h4 style="margin-top:20px;">📐 Desenhos <button class="btn btn-sm btn-success" onclick="openM('modalDes')" data-testid="btn-add-des">+ Novo</button></h4>
+{% for d in desenhos %}
+<div class="list-row">
+  <div class="info"><b>{{ d.numero_desenho }}</b> — {{ d.nome_peca }}</div>
+</div>
+{% else %}<p style="color:#78909c;font-size:12px;">Nenhum desenho.</p>{% endfor %}
+</div>
+
+<!-- Modal Operador -->
+<div class="modal-bg" id="modalOp"><div class="modal-box">
+  <button class="modal-close" onclick="closeM('modalOp')" type="button">×</button>
+  <h3>➕ Novo Operador</h3>
+  <form method="POST" action="/supervisor/operador">
+    <div class="form-group"><label>Matrícula</label><input name="matricula" required data-testid="new-op-mat"></div>
+    <div class="form-group"><label>Nome</label><input name="nome" required data-testid="new-op-nome"></div>
+    <div class="form-group"><label>Turno</label>
+      <select name="turno"><option>Turno A</option><option>Turno B</option><option>Turno C</option></select></div>
+    <div class="form-group"><label>Senha inicial</label><input name="senha" required minlength="4" data-testid="new-op-senha"></div>
+    <button class="btn btn-sm btn-success" data-testid="btn-save-op">Salvar</button>
+  </form>
+</div></div>
+
+<!-- Modal Reset Senha -->
+<div class="modal-bg" id="modalReset"><div class="modal-box">
+  <button class="modal-close" onclick="closeM('modalReset')" type="button">×</button>
+  <h3>🔑 Redefinir Senha</h3>
+  <form method="POST" id="formReset">
+    <div class="form-group"><label>Operador</label><input name="nome" readonly style="opacity:.7"></div>
+    <input type="hidden" name="matricula">
+    <div class="form-group"><label>Nova senha (min. 4)</label><input name="nova_senha" required minlength="4" data-testid="reset-senha-input"></div>
+    <button class="btn btn-sm btn-success" data-testid="btn-save-reset">Redefinir</button>
+  </form>
+</div></div>
+<script>
+document.getElementById('formReset').addEventListener('submit',function(e){
+  e.preventDefault();
+  var mat=this.matricula.value;
+  this.action='/supervisor/operador/reset/'+mat;
+  this.submit();
+});
+</script>
+
+<!-- Modal Máquina -->
+<div class="modal-bg" id="modalMaq"><div class="modal-box">
+  <button class="modal-close" onclick="closeM('modalMaq')" type="button">×</button>
+  <h3>➕ Nova Máquina</h3>
+  <form method="POST" action="/supervisor/maquina">
+    <div class="form-group"><label>Código</label><input name="codigo_maquina" required data-testid="new-maq-cod"></div>
+    <div class="form-group"><label>Descrição</label><input name="descricao" required data-testid="new-maq-desc"></div>
+    <button class="btn btn-sm btn-success" data-testid="btn-save-maq">Salvar</button>
+  </form>
+</div></div>
+
+<!-- Modal Desenho -->
+<div class="modal-bg" id="modalDes"><div class="modal-box">
+  <button class="modal-close" onclick="closeM('modalDes')" type="button">×</button>
+  <h3>➕ Novo Desenho</h3>
+  <form method="POST" action="/supervisor/desenho">
+    <div class="form-group"><label>Número</label><input name="numero_desenho" required data-testid="new-des-num"></div>
+    <div class="form-group"><label>Nome da Peça</label><input name="nome_peca" required data-testid="new-des-nome"></div>
+    <button class="btn btn-sm btn-success" data-testid="btn-save-des">Salvar</button>
+  </form>
+</div></div>
+"""
+
+HISTORICO_TEMPLATE = FASE_TEMPLATE_BASE + """
+<div class="card"><h3>📚 Histórico de Apontamentos</h3>
+<form method="GET" class="filter-row">
+  <input name="q" value="{{ q }}" placeholder="🔍 OP, operador, máquina" data-testid="hist-search">
+  <input type="date" name="date_from" value="{{ date_from }}" data-testid="hist-date-from">
+  <input type="date" name="date_to" value="{{ date_to }}" data-testid="hist-date-to">
+  <select name="status" data-testid="hist-status">
+    <option value="">Todos status</option>
+    <option value="ok" {% if status=='ok' %}selected{% endif %}>OK</option>
+    <option value="pendente" {% if status=='pendente' %}selected{% endif %}>Pendente</option>
+    <option value="aprovado" {% if status=='aprovado' %}selected{% endif %}>Aprovado</option>
+    <option value="rejeitado" {% if status=='rejeitado' %}selected{% endif %}>Rejeitado</option>
+  </select>
+  <button class="btn btn-sm btn-primary" data-testid="btn-hist-filter">Filtrar</button>
+</form>
+<p style="font-size:11px;color:#78909c;">Total: {{ total }} · Página {{ page }}/{{ total_pages }}</p>
+<table class="rep">
+<tr><th>ID</th><th>OP</th><th>Etapa</th><th>Operador</th><th>Máquina</th><th>Boas</th><th>Refugo</th><th>Início</th><th>Status</th></tr>
+{% for r in rows %}
+<tr>
+  <td>{{ r.id }}</td><td>{{ r.num_op }}</td><td>{{ r.numero_etapa }}</td>
+  <td>{{ r.operador }}</td><td>{{ r.codigo_maquina }}</td>
+  <td>{{ r.qtd_boas or '-' }}</td><td>{{ r.refugo or 0 }}</td>
+  <td style="font-size:11px;">{{ (r.data_hora_inicio or '')[:16] }}</td>
+  <td><span class="badge {% if r.status_aprovacao=='pendente' %}b-pend{% elif r.status_aprovacao=='rejeitado' %}b-late{% else %}b-ok{% endif %}">{{ r.status_aprovacao or 'ok' }}</span></td>
+</tr>
+{% else %}<tr><td colspan="9" style="text-align:center;color:#78909c;padding:20px;">Nenhum registro</td></tr>{% endfor %}
+</table>
+<div class="pagination">
+  {% if page > 1 %}<a href="?{{ qs }}&page={{ page-1 }}" data-testid="pag-prev">‹ Anterior</a>{% endif %}
+  <span class="cur">{{ page }}</span>
+  {% if page < total_pages %}<a href="?{{ qs }}&page={{ page+1 }}" data-testid="pag-next">Próxima ›</a>{% endif %}
+</div>
+</div>
+"""
+
+@app.route('/supervisor/gerenciar')
+@login_required
+def supervisor_gerenciar():
+    q = request.args.get('q', '').strip()
+    like = f"%{q}%"
+    if q:
+        operadores = query("SELECT * FROM operadores WHERE ativo=1 AND (matricula LIKE ? OR nome LIKE ?) ORDER BY nome", (like, like)) or []
+        maquinas = query("SELECT * FROM maquinas WHERE codigo_maquina LIKE ? OR descricao LIKE ? ORDER BY codigo_maquina", (like, like)) or []
+        desenhos = query("SELECT * FROM desenhos WHERE numero_desenho LIKE ? OR nome_peca LIKE ? ORDER BY numero_desenho", (like, like)) or []
+    else:
+        operadores = query("SELECT * FROM operadores WHERE ativo=1 ORDER BY nome") or []
+        maquinas = query("SELECT * FROM maquinas ORDER BY codigo_maquina") or []
+        desenhos = query("SELECT * FROM desenhos ORDER BY numero_desenho") or []
+    return render_template_string(BASE_TEMPLATE,
+        conteudo=render_template_string(GERENCIAR_TEMPLATE,
+            operadores=operadores, maquinas=maquinas, desenhos=desenhos, q=q),
+        aba='ger', session=session)
+
+@app.route('/supervisor/historico')
+@login_required
+def supervisor_historico():
+    q = request.args.get('q', '').strip()
+    date_from = request.args.get('date_from', '')
+    date_to = request.args.get('date_to', '')
+    status = request.args.get('status', '')
+    try: page = max(1, int(request.args.get('page', 1)))
+    except Exception: page = 1
+    per = 25
+    where = ["1=1"]; params = []
+    if q:
+        where.append("(a.num_op LIKE ? OR a.operador LIKE ? OR a.codigo_maquina LIKE ?)")
+        params += [f"%{q}%"]*3
+    if date_from: where.append("DATE(a.data_hora_inicio) >= ?"); params.append(date_from)
+    if date_to: where.append("DATE(a.data_hora_inicio) <= ?"); params.append(date_to)
+    if status: where.append("COALESCE(a.status_aprovacao,'ok') = ?"); params.append(status)
+    wsql = " AND ".join(where)
+    total_row = query(f"SELECT COUNT(*) as c FROM apontamentos a WHERE {wsql}", tuple(params), one=True)
+    total = total_row['c'] if total_row else 0
+    total_pages = max(1, (total + per - 1) // per)
+    rows = query(f"""SELECT * FROM apontamentos a WHERE {wsql}
+        ORDER BY a.data_hora_inicio DESC LIMIT ? OFFSET ?""",
+        tuple(params + [per, (page-1)*per])) or []
+    from urllib.parse import urlencode
+    qs = urlencode({'q':q,'date_from':date_from,'date_to':date_to,'status':status})
+    return render_template_string(BASE_TEMPLATE,
+        conteudo=render_template_string(HISTORICO_TEMPLATE,
+            rows=rows, total=total, page=page, total_pages=total_pages,
+            q=q, date_from=date_from, date_to=date_to, status=status, qs=qs),
+        aba='hist', session=session)
 
 
 if __name__ == '__main__':
