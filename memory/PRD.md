@@ -9,7 +9,7 @@ Flask + SQLite (WAL) + Jinja2 mono-arquivo em `/app/backend/mes_aps.py`. Servido
 DEBUG/SECRET_KEY via env, bcrypt com upgrade transparente SHA256, WAL, `audit_log`, backup no startup.
 
 ### Fase 2 — Apontamentos (2026-02) ✅
-Justificativa obrigatória para refugo > saldo (vai p/ fila `pendente`), cronômetro visível JS, fechamento automático fim de turno, fila de validação em `/supervisor/fila` (aprovar/rejeitar aplica desconto de saldo).
+Justificativa obrigatória para refugo > saldo (fila `pendente`), cronômetro visível JS, fechamento automático fim de turno, fila de validação em `/supervisor/fila`.
 
 ### Fase 3 — Relatórios (2026-02) ✅
 `/supervisor/relatorios` — OEE por máquina, Pareto paradas, Aging OPs, Produtividade por operador, com filtros período+máquina.
@@ -18,13 +18,15 @@ Justificativa obrigatória para refugo > saldo (vai p/ fila `pendente`), cronôm
 `/supervisor/saude` — tamanho DB, apontamentos abertos, pendentes aprovação, último backup, config editável.
 
 ### Fase 4 — Modais + Busca + Paginação (2026-02) ✅
-- `/supervisor/gerenciar` — CRUD de operadores/máquinas/desenhos via modais, busca unificada por nome/código/matrícula, reset de senha em um clique com modal pré-preenchido.
-- `/supervisor/historico` — Lista paginada de apontamentos (25/pág) com filtros por texto, data, status; navegação Anterior/Próxima preservando querystring.
-- Rotas backend: reset senha, soft delete operador, cancelar/reabrir OP com justificativa.
+`/supervisor/gerenciar` (CRUD operadores/máquinas/desenhos, busca, reset senha), `/supervisor/historico` (paginado 25/pág, filtros).
+
+### Fase 4.5 — Edição + Backup + Export (2026-09) ✅
+- **Edição em modais**: `POST /supervisor/operador/editar/<matricula>`, `/supervisor/maquina/editar/<codigo>`, `/supervisor/desenho/editar/<numero>` — cada mudança registrada em `audit_log` com diff (antes→depois). Modais pre-preenchidos via `fillEdit()` JS.
+- **Auditoria**: `/supervisor/auditoria` — log paginado (50/pág) de todas as ações.
+- **Backup agendado**: `@app.before_request check_scheduled_backup()` — se último backup tiver >24h, roda `criar_backup()` automaticamente (check a cada 5 min, não a cada request). Aviso vermelho `alert-backup` no painel de saúde quando atrasado.
+- **Export XLSX/PDF**: `/supervisor/export/<kind>/<fmt>` (kind: oee, pareto, aging, produtividade; fmt: xlsx, pdf). openpyxl para Excel, reportlab (SimpleDocTemplate+Table) para PDF com header estilizado e zebra rows. 8 botões de download na página de relatórios.
 
 ## Backlog
-- Modais de EDIÇÃO (hoje há add + reset; falta editar campos gerais dos mestres).
-- Backup agendado (APScheduler ou cron).
-- Exportação Excel/PDF (libs instaladas).
-- Toasts de pendências em tempo real (poll ou SSE).
-- Manual curto operador/supervisor.
+- Toasts de pendências em tempo real (poll ou SSE)
+- Manual curto operador/supervisor
+- Integração file storage para desenhos técnicos (PDF/imagem anexada ao desenho)

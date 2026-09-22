@@ -20,6 +20,7 @@ import io
 import shutil
 import json
 import bcrypt
+import time
 from datetime import datetime
 from functools import wraps
 from flask import Flask, render_template_string, request, redirect, url_for, session, flash, jsonify, send_file
@@ -2253,6 +2254,11 @@ FILA_TEMPLATE = FASE_TEMPLATE_BASE + """
 
 SAUDE_TEMPLATE = FASE_TEMPLATE_BASE + """
 <div class="card"><h3>❤️ Painel de Saúde do Sistema</h3>
+{% if backup_atrasado %}
+<div style="background:#7f1d1d;border:1px solid #ef4444;color:#fecaca;padding:10px;border-radius:6px;margin-bottom:14px;font-size:12px;" data-testid="alert-backup">
+  ⚠️ <b>ATENÇÃO:</b> Último backup tem mais de 24h! Verifique se o agendamento está ativo.
+</div>
+{% endif %}
 <div class="row-flex">
   <div class="metric ok"><div class="v">{{ tam_db_mb }}</div><div class="l">Tamanho DB (MB)</div></div>
   <div class="metric"><div class="v">{{ apontamentos_abertos }}</div><div class="l">Apontamentos Abertos</div></div>
@@ -2280,6 +2286,14 @@ RELATORIOS_TEMPLATE = FASE_TEMPLATE_BASE + """
   </select>
   <button class="btn btn-sm btn-primary" data-testid="btn-filtrar">Filtrar</button>
   <a class="btn btn-sm btn-success" href="/relatorio/csv/mes" data-testid="btn-export-csv">⬇ CSV</a>
+  <a class="btn btn-sm btn-secondary" href="/supervisor/export/oee/xlsx" data-testid="btn-export-oee-xlsx">⬇ OEE XLSX</a>
+  <a class="btn btn-sm btn-secondary" href="/supervisor/export/oee/pdf" data-testid="btn-export-oee-pdf">⬇ OEE PDF</a>
+  <a class="btn btn-sm btn-secondary" href="/supervisor/export/pareto/xlsx" data-testid="btn-export-pareto-xlsx">⬇ Pareto XLSX</a>
+  <a class="btn btn-sm btn-secondary" href="/supervisor/export/pareto/pdf" data-testid="btn-export-pareto-pdf">⬇ Pareto PDF</a>
+  <a class="btn btn-sm btn-secondary" href="/supervisor/export/aging/xlsx" data-testid="btn-export-aging-xlsx">⬇ Aging XLSX</a>
+  <a class="btn btn-sm btn-secondary" href="/supervisor/export/aging/pdf" data-testid="btn-export-aging-pdf">⬇ Aging PDF</a>
+  <a class="btn btn-sm btn-secondary" href="/supervisor/export/produtividade/xlsx" data-testid="btn-export-prod-xlsx">⬇ Prod. XLSX</a>
+  <a class="btn btn-sm btn-secondary" href="/supervisor/export/produtividade/pdf" data-testid="btn-export-prod-pdf">⬇ Prod. PDF</a>
 </form>
 <h4>🎯 OEE por Máquina</h4>
 <table class="rep">
@@ -2365,6 +2379,12 @@ def supervisor_saude():
     tam = os.path.getsize(DB_NAME) if os.path.exists(DB_NAME) else 0
     backups = listar_backups()
     ultimo = backups[0] if backups else None
+    # Calcula idade do último backup em horas
+    backup_atrasado = False
+    if ultimo:
+        bpath = os.path.join(BACKUP_DIR, ultimo if isinstance(ultimo, str) else ultimo.get('arquivo',''))
+        if os.path.exists(bpath):
+            backup_atrasado = ((time.time() - os.path.getmtime(bpath)) / 3600) > 24
     abertos = query("SELECT COUNT(*) as c FROM apontamentos WHERE qtd_boas IS NULL AND status='Ativo'", one=True)
     pend = query("SELECT COUNT(*) as c FROM apontamentos WHERE status_aprovacao='pendente'", one=True)
     return render_template_string(BASE_TEMPLATE,
@@ -2376,7 +2396,8 @@ def supervisor_saude():
             shift_end_time=get_config('shift_end_time','22:00'),
             min_stop_min=get_config('min_stoppage_comment_min','15'),
             oee_target=get_config('oee_target_default','0.75'),
-            retencao=get_config('backup_retention_days','30')),
+            retencao=get_config('backup_retention_days','30'),
+            backup_atrasado=backup_atrasado),
         aba='saude', session=session)
 
 @app.route('/supervisor/saude/config', methods=['POST'])
@@ -2498,6 +2519,79 @@ def supervisor_operador_excluir(matricula):
     flash('🗑️ Operador desativado.', 'info')
     return redirect(url_for('supervisor'))
 
+@app.route('/supervisor/operador/editar/<matricula>', methods=['POST'])
+@login_required
+def supervisor_operador_editar(matricula):
+    nome = request.form.get('nome', '').strip()
+    turno = request.form.get('turno', '').strip()
+    papel = request.form.get('papel', 'operador').strip()
+    if not nome:
+        flash('Nome obrigatório', 'danger'); return redirect(url_for('supervisor_gerenciar'))
+    antigo = query("SELECT * FROM operadores WHERE matricula = ?", (matricula,), one=True)
+    query("UPDATE operadores SET nome = ?, turno = ?, papel = ? WHERE matricula = ?",
+          (nome, turno, papel, matricula), commit=True)
+    mudancas = []
+    if antigo:
+        if antigo['nome'] != nome: mudancas.append(f"nome:{antigo['nome']}→{nome}")
+        if antigo['turno'] != turno: mudancas.append(f"turno:{antigo['turno']}→{turno}")
+        if (antigo['papel'] or '') != papel: mudancas.append(f"papel:{antigo['papel']}→{papel}")
+    log_audit('editar', 'operador', matricula, '; '.join(mudancas) or 'sem mudanças')
+    flash('✏️ Operador atualizado.', 'success')
+    return redirect(url_for('supervisor_gerenciar'))
+
+@app.route('/supervisor/maquina/editar/<codigo>', methods=['POST'])
+@login_required
+def supervisor_maquina_editar(codigo):
+    descricao = request.form.get('descricao', '').strip()
+    if not descricao:
+        flash('Descrição obrigatória', 'danger'); return redirect(url_for('supervisor_gerenciar'))
+    antigo = query("SELECT * FROM maquinas WHERE codigo_maquina = ?", (codigo,), one=True)
+    query("UPDATE maquinas SET descricao = ? WHERE codigo_maquina = ?", (descricao, codigo), commit=True)
+    mud = f"desc:{antigo['descricao']}→{descricao}" if antigo and antigo['descricao'] != descricao else ''
+    log_audit('editar', 'maquina', codigo, mud)
+    flash('✏️ Máquina atualizada.', 'success')
+    return redirect(url_for('supervisor_gerenciar'))
+
+@app.route('/supervisor/desenho/editar/<numero>', methods=['POST'])
+@login_required
+def supervisor_desenho_editar(numero):
+    nome_peca = request.form.get('nome_peca', '').strip()
+    if not nome_peca:
+        flash('Nome obrigatório', 'danger'); return redirect(url_for('supervisor_gerenciar'))
+    antigo = query("SELECT * FROM desenhos WHERE numero_desenho = ?", (numero,), one=True)
+    query("UPDATE desenhos SET nome_peca = ? WHERE numero_desenho = ?", (nome_peca, numero), commit=True)
+    mud = f"nome:{antigo['nome_peca']}→{nome_peca}" if antigo and antigo['nome_peca'] != nome_peca else ''
+    log_audit('editar', 'desenho', numero, mud)
+    flash('✏️ Desenho atualizado.', 'success')
+    return redirect(url_for('supervisor_gerenciar'))
+
+@app.route('/supervisor/auditoria')
+@login_required
+def supervisor_auditoria():
+    page = max(1, int(request.args.get('page', 1)))
+    per = 50
+    total_row = query("SELECT COUNT(*) as c FROM audit_log", one=True)
+    total = total_row['c'] if total_row else 0
+    total_pages = max(1, (total + per - 1) // per)
+    rows = query("SELECT * FROM audit_log ORDER BY id DESC LIMIT ? OFFSET ?", (per, (page-1)*per)) or []
+    html = FASE_TEMPLATE_BASE + """
+    <div class="card"><h3>📜 Auditoria de Mudanças</h3>
+    <p style="font-size:11px;color:#78909c;">Total: {{ total }} · Página {{ page }}/{{ total_pages }}</p>
+    <table class="rep"><tr><th>Quando</th><th>Usuário</th><th>Ação</th><th>Entidade</th><th>ID</th><th>Detalhes</th></tr>
+    {% for r in rows %}<tr>
+      <td style="font-size:11px;">{{ r.data_hora }}</td><td>{{ r.usuario }}</td>
+      <td><span class="badge b-pend">{{ r.acao }}</span></td><td>{{ r.entidade }}</td>
+      <td>{{ r.entidade_id }}</td><td style="font-size:11px;">{{ r.detalhes or '-' }}</td>
+    </tr>{% endfor %}</table>
+    <div class="pagination">
+      {% if page > 1 %}<a href="?page={{ page-1 }}">‹</a>{% endif %}
+      <span class="cur">{{ page }}</span>
+      {% if page < total_pages %}<a href="?page={{ page+1 }}">›</a>{% endif %}
+    </div></div>"""
+    return render_template_string(BASE_TEMPLATE,
+        conteudo=render_template_string(html, rows=rows, total=total, page=page, total_pages=total_pages),
+        aba='ger', session=session)
+
 @app.route('/supervisor/op/cancelar/<num_op>', methods=['POST'])
 @login_required
 def supervisor_op_cancelar(num_op):
@@ -2562,6 +2656,8 @@ GERENCIAR_TEMPLATE = FASE_TEMPLATE_BASE + MODAL_CSS + """
 <div class="list-row">
   <div class="info"><b>{{ o.matricula }}</b> — {{ o.nome }} <small>Turno {{ o.turno }} {% if o.papel %}· {{ o.papel }}{% endif %}</small></div>
   <div class="act-btns">
+    <button class="btn btn-sm btn-primary" data-testid="btn-edit-op-{{ o.matricula }}"
+      onclick="fillEdit('modalEditOp',{matricula:'{{ o.matricula }}',nome:'{{ o.nome }}',turno:'{{ o.turno }}',papel:'{{ o.papel or "operador" }}'})">✏️</button>
     <button class="btn btn-sm btn-warning" data-testid="btn-reset-{{ o.matricula }}"
       onclick="fillEdit('modalReset',{matricula:'{{ o.matricula }}',nome:'{{ o.nome }}'})">🔑 Reset</button>
     <form method="POST" action="/supervisor/operador/excluir/{{ o.matricula }}" style="display:inline"
@@ -2576,6 +2672,10 @@ GERENCIAR_TEMPLATE = FASE_TEMPLATE_BASE + MODAL_CSS + """
 {% for m in maquinas %}
 <div class="list-row">
   <div class="info"><b>{{ m.codigo_maquina }}</b> — {{ m.descricao }} <small>{{ m.status_operacional }}</small></div>
+  <div class="act-btns">
+    <button class="btn btn-sm btn-primary" data-testid="btn-edit-maq-{{ m.codigo_maquina }}"
+      onclick="fillEdit('modalEditMaq',{codigo:'{{ m.codigo_maquina }}',descricao:'{{ m.descricao }}'})">✏️</button>
+  </div>
 </div>
 {% else %}<p style="color:#78909c;font-size:12px;">Nenhuma máquina.</p>{% endfor %}
 
@@ -2583,9 +2683,75 @@ GERENCIAR_TEMPLATE = FASE_TEMPLATE_BASE + MODAL_CSS + """
 {% for d in desenhos %}
 <div class="list-row">
   <div class="info"><b>{{ d.numero_desenho }}</b> — {{ d.nome_peca }}</div>
+  <div class="act-btns">
+    <button class="btn btn-sm btn-primary" data-testid="btn-edit-des-{{ d.numero_desenho }}"
+      onclick="fillEdit('modalEditDes',{numero:'{{ d.numero_desenho }}',nome_peca:'{{ d.nome_peca }}'})">✏️</button>
+  </div>
 </div>
 {% else %}<p style="color:#78909c;font-size:12px;">Nenhum desenho.</p>{% endfor %}
+<p style="margin-top:16px;"><a class="btn btn-sm btn-secondary" href="/supervisor/auditoria" data-testid="btn-audit">📜 Ver Auditoria de Mudanças</a></p>
 </div>
+
+<!-- Modal Editar Operador -->
+<div class="modal-bg" id="modalEditOp"><div class="modal-box">
+  <button class="modal-close" onclick="closeM('modalEditOp')" type="button">×</button>
+  <h3>✏️ Editar Operador</h3>
+  <form method="POST" id="formEditOp">
+    <div class="form-group"><label>Matrícula</label><input name="matricula" readonly style="opacity:.6"></div>
+    <div class="form-group"><label>Nome</label><input name="nome" required data-testid="edit-op-nome"></div>
+    <div class="form-group"><label>Turno</label>
+      <select name="turno"><option>Turno A</option><option>Turno B</option><option>Turno C</option></select></div>
+    <div class="form-group"><label>Papel</label>
+      <select name="papel"><option value="operador">operador</option><option value="supervisor">supervisor</option></select></div>
+    <button class="btn btn-sm btn-success" data-testid="btn-save-edit-op">Salvar</button>
+  </form>
+</div></div>
+<script>
+document.getElementById('formEditOp').addEventListener('submit',function(e){
+  e.preventDefault();
+  var m=this.matricula.value;
+  this.action='/supervisor/operador/editar/'+m;
+  this.submit();
+});
+</script>
+
+<!-- Modal Editar Máquina -->
+<div class="modal-bg" id="modalEditMaq"><div class="modal-box">
+  <button class="modal-close" onclick="closeM('modalEditMaq')" type="button">×</button>
+  <h3>✏️ Editar Máquina</h3>
+  <form method="POST" id="formEditMaq">
+    <div class="form-group"><label>Código</label><input name="codigo" readonly style="opacity:.6"></div>
+    <div class="form-group"><label>Descrição</label><input name="descricao" required data-testid="edit-maq-desc"></div>
+    <button class="btn btn-sm btn-success" data-testid="btn-save-edit-maq">Salvar</button>
+  </form>
+</div></div>
+<script>
+document.getElementById('formEditMaq').addEventListener('submit',function(e){
+  e.preventDefault();
+  var c=this.codigo.value;
+  this.action='/supervisor/maquina/editar/'+encodeURIComponent(c);
+  this.submit();
+});
+</script>
+
+<!-- Modal Editar Desenho -->
+<div class="modal-bg" id="modalEditDes"><div class="modal-box">
+  <button class="modal-close" onclick="closeM('modalEditDes')" type="button">×</button>
+  <h3>✏️ Editar Desenho</h3>
+  <form method="POST" id="formEditDes">
+    <div class="form-group"><label>Número</label><input name="numero" readonly style="opacity:.6"></div>
+    <div class="form-group"><label>Nome da Peça</label><input name="nome_peca" required data-testid="edit-des-nome"></div>
+    <button class="btn btn-sm btn-success" data-testid="btn-save-edit-des">Salvar</button>
+  </form>
+</div></div>
+<script>
+document.getElementById('formEditDes').addEventListener('submit',function(e){
+  e.preventDefault();
+  var n=this.numero.value;
+  this.action='/supervisor/desenho/editar/'+encodeURIComponent(n);
+  this.submit();
+});
+</script>
 
 <!-- Modal Operador -->
 <div class="modal-bg" id="modalOp"><div class="modal-box">
@@ -2729,6 +2895,101 @@ def supervisor_historico():
             rows=rows, total=total, page=page, total_pages=total_pages,
             q=q, date_from=date_from, date_to=date_to, status=status, qs=qs),
         aba='hist', session=session)
+
+
+# ============================================
+# BACKUP AGENDADO + EXPORT EXCEL/PDF
+# ============================================
+_last_backup_check = [0.0]
+
+@app.before_request
+def check_scheduled_backup():
+    """Roda backup no início de cada turno se o último tiver > 24h (limite de 1 check / 5 min)."""
+    import time as _t
+    if request.path.startswith('/static'):
+        return
+    now = _t.time()
+    if now - _last_backup_check[0] < 300:
+        return
+    _last_backup_check[0] = now
+    try:
+        backups = listar_backups()
+        if backups:
+            fname = backups[0] if isinstance(backups[0], str) else backups[0].get('arquivo', '')
+            path = os.path.join(BACKUP_DIR, fname)
+            if os.path.exists(path):
+                age_h = (time.time() - os.path.getmtime(path)) / 3600
+                if age_h < 24:
+                    return
+        criar_backup()
+        log_audit('backup_agendado', 'sistema', 'backup', 'auto >24h')
+    except Exception as e:
+        print(f"[backup agendado] {e}")
+
+def _report_data(kind):
+    """Reaproveita a lógica dos relatórios para export."""
+    if kind == 'oee':
+        return query("""SELECT a.codigo_maquina as maquina,
+            SUM(a.qtd_boas) as boas, SUM(a.refugo) as refugo,
+            ROUND(AVG(COALESCE(r.tempo_ciclo_minutos,1)*60),1) as ciclo_s
+            FROM apontamentos a
+            LEFT JOIN roteiros_padrao r ON r.numero_etapa=a.numero_etapa
+            WHERE a.qtd_boas IS NOT NULL GROUP BY a.codigo_maquina""") or []
+    if kind == 'pareto':
+        return query("""SELECT motivo,
+            ROUND(SUM((julianday(COALESCE(data_hora_fim,datetime('now')))-julianday(data_hora_inicio))*1440),1) as minutos
+            FROM paradas_maquina GROUP BY motivo ORDER BY minutos DESC""") or []
+    if kind == 'aging':
+        return query("""SELECT o.num_op, o.numero_desenho, o.status_geral, o.meta_total,
+            COALESCE(SUM(e.saldo_residual),0) as saldo, o.data_criacao
+            FROM ordens_producao o LEFT JOIN op_etapas_execucao e ON o.num_op=e.num_op
+            WHERE o.status_geral != 'Concluída' GROUP BY o.num_op""") or []
+    if kind == 'produtividade':
+        return query("""SELECT a.operador, o.nome, SUM(a.qtd_boas) as boas, SUM(a.refugo) as refugo,
+            ROUND(SUM((julianday(a.data_hora_fim)-julianday(a.data_hora_inicio))*24),2) as horas
+            FROM apontamentos a LEFT JOIN operadores o ON o.matricula=a.operador
+            WHERE a.qtd_boas IS NOT NULL GROUP BY a.operador""") or []
+    return []
+
+@app.route('/supervisor/export/<kind>/<fmt>')
+@login_required
+def supervisor_export(kind, fmt):
+    data = _report_data(kind)
+    if not data:
+        flash('Sem dados para exportar.', 'info'); return redirect(url_for('supervisor_relatorios'))
+    headers = list(data[0].keys())
+    if fmt == 'xlsx':
+        from openpyxl import Workbook
+        wb = Workbook(); ws = wb.active; ws.title = kind[:30]
+        ws.append(headers)
+        for row in data: ws.append([row[h] for h in headers])
+        buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+        return send_file(buf, as_attachment=True, download_name=f"{kind}.xlsx",
+                         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    if fmt == 'pdf':
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib import colors
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
+        from reportlab.lib.styles import getSampleStyleSheet
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=A4)
+        styles = getSampleStyleSheet()
+        elems = [Paragraph(f"Relatório {kind.upper()} — ProFab MES/APS", styles['Title'])]
+        rows = [headers] + [[str(r[h]) for h in headers] for r in data]
+        t = Table(rows)
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#0d1b2a')),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+            ('GRID', (0,0), (-1,-1), 0.4, colors.grey),
+            ('FONTSIZE', (0,0), (-1,-1), 7),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#f1f5f9')]),
+        ]))
+        elems.append(t)
+        doc.build(elems)
+        buf.seek(0)
+        return send_file(buf, as_attachment=True, download_name=f"{kind}.pdf", mimetype="application/pdf")
+    flash('Formato inválido', 'danger')
+    return redirect(url_for('supervisor_relatorios'))
 
 
 if __name__ == '__main__':
