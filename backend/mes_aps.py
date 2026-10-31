@@ -21,7 +21,8 @@ import shutil
 import json
 import bcrypt
 import time
-from datetime import datetime
+import requests
+from datetime import datetime, timezone, timedelta
 from functools import wraps
 from flask import Flask, render_template_string, request, redirect, url_for, session, flash, jsonify, send_file
 
@@ -66,6 +67,10 @@ def upgrade_senha_se_legado(matricula, senha_digitada, senha_hash_atual):
         query("UPDATE operadores SET senha = ? WHERE matricula = ?",
               (novo_hash, matricula), commit=True)
 
+# Dono do app: entra como supervisor automaticamente no 1º login Google
+OWNER_EMAIL = os.environ.get("OWNER_EMAIL", "martinsdesiqueiraigor@gmail.com")
+EMERGENT_AUTH_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
+
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -74,6 +79,31 @@ def login_required(f):
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
+
+@app.before_request
+def load_session_from_cookie():
+    """Fallback global: restaura sessão Flask a partir do cookie session_token (Google Sign-In)."""
+    if session.get('matricula'):
+        return
+    tok = request.cookies.get('session_token')
+    if not tok:
+        return
+    r = query("SELECT * FROM user_sessions WHERE session_token = ?", (tok,), one=True)
+    if not r:
+        return
+    try:
+        exp = datetime.fromisoformat(r['expires_at'])
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        if exp < datetime.now(timezone.utc):
+            return
+        session['matricula'] = r['matricula']
+        op = query("SELECT nome, turno FROM operadores WHERE matricula = ?", (r['matricula'],), one=True)
+        if op:
+            session['nome'] = op['nome']
+            session['turno'] = op['turno']
+    except Exception:
+        pass
 
 # ============================================
 # FUNÇÕES DE BACKUP
@@ -171,6 +201,18 @@ def _ensure_upgrades():
             )""")
             conn.execute("""CREATE TABLE IF NOT EXISTS configuracoes (
                 chave TEXT PRIMARY KEY, valor TEXT
+            )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS user_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT,
+                matricula TEXT,
+                session_token TEXT UNIQUE,
+                expires_at TEXT
+            )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS google_vinculos (
+                email TEXT PRIMARY KEY,
+                matricula TEXT,
+                vinculado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""")
             # defaults
             for k, v in [("shift_end_time", "22:00"),
@@ -804,6 +846,12 @@ LOGIN_TEMPLATE = """
         </div>
         <button type="submit" class="btn btn-primary">🚀 Entrar</button>
     </form>
+    <div style="margin:15px 0; text-align:center; color:#455a64; font-size:11px;">— ou —</div>
+    <!-- REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH -->
+    <button type="button" class="btn btn-secondary" style="width:100%;" data-testid="btn-google-login"
+            onclick="window.location.href='https://auth.emergentagent.com/?redirect='+encodeURIComponent(window.location.origin+'/auth/google/landing')">
+        🔵 Entrar com Google
+    </button>
     <div style="margin-top:15px; font-size:11px; color:#455a64; text-align:center;">
         Teste: 1024, 1025, 1026<br>Senha: 123456
     </div>
@@ -1551,9 +1599,14 @@ def login():
 
 @app.route('/logout')
 def logout():
+    tok = request.cookies.get('session_token')
+    if tok:
+        query("DELETE FROM user_sessions WHERE session_token = ?", (tok,), commit=True)
     session.clear()
+    resp = redirect(url_for('login'))
+    resp.delete_cookie('session_token', path='/')
     flash('Logout realizado', 'info')
-    return redirect(url_for('login'))
+    return resp
 
 @app.route('/')
 def home():
@@ -2990,6 +3043,109 @@ def supervisor_export(kind, fmt):
         return send_file(buf, as_attachment=True, download_name=f"{kind}.pdf", mimetype="application/pdf")
     flash('Formato inválido', 'danger')
     return redirect(url_for('supervisor_relatorios'))
+
+
+# ============================================
+# GOOGLE SIGN-IN (Emergent managed OAuth)
+# ============================================
+GOOGLE_LANDING_TEMPLATE = """
+<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><title>Entrando...</title>
+<style>body{background:#0d1b2a;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.m{text-align:center}.m .l{font-size:20px;margin-bottom:10px}.m .s{font-size:12px;color:#78909c}
+.err{background:#7f1d1d;color:#fecaca;padding:12px;border-radius:8px;max-width:400px;margin:10px auto;font-size:13px}</style></head>
+<body><div class="m"><div class="l">🔵 Autenticando com Google...</div>
+<div class="s" id="st">Validando sessão segura</div>
+<div id="err"></div></div>
+<script>
+async function process(){
+  try{
+    var h = location.hash || '';
+    var m = h.match(/session_id=([^&]+)/);
+    if(!m){document.getElementById('st').textContent='Redirecionando para o login...';location.replace('/login');return;}
+    var r = await fetch('/auth/google/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:m[1]})});
+    var j = await r.json();
+    if(r.ok && j.ok){history.replaceState(null,'',location.pathname);location.replace(j.redirect||'/operador');}
+    else{document.getElementById('err').innerHTML='<div class="err">'+(j.detail||'Falha na autenticação')+'</div>';document.getElementById('st').textContent='';}
+  }catch(e){document.getElementById('err').innerHTML='<div class="err">Erro inesperado: '+e+'</div>';}
+}
+process();
+</script></body></html>
+"""
+
+@app.route('/auth/google/landing')
+def auth_google_landing():
+    """Página de callback que processa o fragment #session_id via JS (fragment não chega ao servidor)."""
+    return render_template_string(GOOGLE_LANDING_TEMPLATE)
+
+@app.route('/auth/google/session', methods=['POST'])
+def auth_google_session():
+    """Troca session_id por dados do usuário (chamada server-side) e cria sessão local."""
+    data = request.get_json(silent=True) or {}
+    sid = data.get('session_id', '').strip()
+    if not sid:
+        return jsonify({'ok': False, 'detail': 'session_id ausente'}), 400
+    try:
+        r = requests.get(EMERGENT_AUTH_URL, headers={'X-Session-ID': sid}, timeout=30)
+        r.raise_for_status()
+        prof = r.json()
+    except Exception as e:
+        return jsonify({'ok': False, 'detail': f'Falha ao validar sessão com Emergent: {e}'}), 401
+
+    email = (prof.get('email') or '').lower()
+    nome = prof.get('name') or email.split('@')[0]
+    session_token = prof.get('session_token')
+    if not email or not session_token:
+        return jsonify({'ok': False, 'detail': 'Resposta inválida do provedor'}), 401
+
+    # Resolve matricula: vínculo pré-existente ou dono do app
+    vinc = query("SELECT matricula FROM google_vinculos WHERE email = ?", (email,), one=True)
+    if vinc:
+        matricula = vinc['matricula']
+    elif email == OWNER_EMAIL:
+        # Auto-provisiona o dono como supervisor
+        existente = query("SELECT matricula FROM operadores WHERE papel = 'supervisor' LIMIT 1", one=True)
+        matricula = existente['matricula'] if existente else None
+        if not matricula:
+            matricula = '1000'
+            query("""INSERT INTO operadores (matricula, nome, senha, turno, papel, ativo)
+                     VALUES (?, ?, ?, 'Turno A', 'supervisor', 1)""",
+                  (matricula, nome, gerar_hash_senha(secrets.token_hex(16))), commit=True)
+        query("INSERT OR REPLACE INTO google_vinculos (email, matricula) VALUES (?, ?)", (email, matricula), commit=True)
+    else:
+        log_audit('google_login_negado', 'auth', email)
+        return jsonify({'ok': False, 'detail': f'Conta {email} sem vínculo. Peça ao supervisor para vincular seu e-mail em Gerenciar.'}), 403
+
+    op = query("SELECT * FROM operadores WHERE matricula = ? AND ativo = 1", (matricula,), one=True)
+    if not op:
+        return jsonify({'ok': False, 'detail': f'Operador {matricula} vinculado mas inativo'}), 403
+
+    # Sessão local (7 dias, timezone-aware)
+    expires = (datetime.now(timezone.utc).replace(microsecond=0) + timedelta(days=7)).isoformat()
+    query("INSERT INTO user_sessions (email, matricula, session_token, expires_at) VALUES (?, ?, ?, ?)",
+          (email, matricula, session_token, expires), commit=True)
+    log_audit('google_login', 'auth', email, f'matricula={matricula}')
+
+    resp = jsonify({'ok': True, 'redirect': '/operador' if (op['papel'] or 'operador') != 'supervisor' else '/supervisor',
+                    'user': {'matricula': matricula, 'nome': op['nome'], 'papel': op['papel'] or 'operador'}})
+    resp.set_cookie('session_token', session_token, max_age=7*24*3600,
+                    httponly=True, secure=True, samesite='None', path='/')
+    return resp
+
+@app.route('/supervisor/vincular-google', methods=['POST'])
+@login_required
+def supervisor_vincular_google():
+    email = request.form.get('email', '').strip().lower()
+    matricula = request.form.get('matricula', '').strip()
+    if not email or '@' not in email or not matricula:
+        flash('E-mail e matrícula obrigatórios.', 'danger')
+        return redirect(url_for('supervisor_gerenciar'))
+    if not query("SELECT 1 FROM operadores WHERE matricula = ?", (matricula,), one=True):
+        flash('Matrícula não encontrada.', 'danger')
+        return redirect(url_for('supervisor_gerenciar'))
+    query("INSERT OR REPLACE INTO google_vinculos (email, matricula) VALUES (?, ?)", (email, matricula), commit=True)
+    log_audit('vincular_google', 'auth', email, f'matricula={matricula}')
+    flash(f'🔗 {email} vinculado ao operador {matricula}.', 'success')
+    return redirect(url_for('supervisor_gerenciar'))
 
 
 if __name__ == '__main__':
