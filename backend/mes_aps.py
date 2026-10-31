@@ -214,6 +214,15 @@ def _ensure_upgrades():
                 matricula TEXT,
                 vinculado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS op_anexos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                num_op TEXT,
+                nome_arquivo TEXT,
+                storage_path TEXT,
+                content_type TEXT,
+                enviado_por TEXT,
+                criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""")
             # defaults
             for k, v in [("shift_end_time", "22:00"),
                          ("min_stoppage_comment_min", "15"),
@@ -776,12 +785,14 @@ BASE_TEMPLATE = """
             <a href="/operador" class="{% if aba == 'operador' %}active{% endif %}">🧑‍🔧 OP</a>
             <a href="/pcp" class="{% if aba == 'pcp' %}active{% endif %}">📋 PCP</a>
             <a href="/supervisor" class="{% if aba == 'supervisor' %}active{% endif %}">👮 SUP</a>
-            <a href="/supervisor/fila" class="{% if aba == 'fila' %}active{% endif %}">✅ Fila</a>
+            <a href="/supervisor/fila" class="{% if aba == 'fila' %}active{% endif %}" data-testid="nav-fila">✅ Fila <span id="badge-fila" data-testid="badge-fila" style="display:none;background:#ef4444;color:#fff;border-radius:999px;padding:1px 7px;font-size:10px;font-weight:bold;animation:softPulse 1.2s ease-in-out infinite;"></span></a>
             <a href="/supervisor/relatorios" class="{% if aba == 'rel' %}active{% endif %}">📊 Relat.</a>
             <a href="/supervisor/saude" class="{% if aba == 'saude' %}active{% endif %}">❤️ Saúde</a>
             <a href="/supervisor/gerenciar" class="{% if aba == 'ger' %}active{% endif %}">⚙️ Gerenciar</a>
             <a href="/supervisor/historico" class="{% if aba == 'hist' %}active{% endif %}">📚 Histórico</a>
+            <a href="/manual" class="{% if aba == 'manual' %}active{% endif %}">📖 Manual</a>
         </div>
+        <style>@keyframes softPulse{0%,100%{opacity:1}50%{opacity:.45}}</style>
         
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
@@ -824,6 +835,19 @@ BASE_TEMPLATE = """
         }
         setInterval(updateChronos, 1000);
         updateChronos();
+
+        // Badge de pendências em tempo real (poll 30s)
+        function updateBadgeFila(){
+            fetch('/pendencias/count').then(function(r){return r.json()})
+            .then(function(j){
+                var b=document.getElementById('badge-fila');
+                if(!b) return;
+                if(j.count>0){b.textContent=j.count;b.style.display='inline-block';}
+                else{b.style.display='none';}
+            }).catch(function(){});
+        }
+        setInterval(updateBadgeFila, 30000);
+        updateBadgeFila();
     </script>
 </body>
 </html>
@@ -905,6 +929,24 @@ OPERADOR_TEMPLATE = """
         </form>
     </div>
     
+    <div class="card">
+        <h3>📎 Desenho da OP</h3>
+        {% if anexos %}
+        <div class="form-group">
+            <label>Ver desenho técnico (PDF/imagem)</label>
+            <select id="sel-anexo" data-testid="select-anexo-op">
+                {% for a in anexos %}
+                <option value="/anexo/{{ a.num_op }}">OP {{ a.num_op }} — {{ a.nome_arquivo }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <a class="btn btn-primary touch-btn" id="btn-ver-anexo" data-testid="btn-ver-anexo" href="/anexo/{{ anexos[0].num_op }}" target="_blank"
+           onclick="this.href=document.getElementById('sel-anexo').value">👁️ Visualizar Desenho</a>
+        {% else %}
+        <p style="font-size:12px;color:#78909c;">Nenhum desenho anexado ainda. O supervisor pode anexar em ⚙️ Gerenciar → 📎 Anexos.</p>
+        {% endif %}
+    </div>
+
     <div class="card">
         <h3>🔄 Atividades Ativas</h3>
         {% if ativas %}
@@ -1644,10 +1686,15 @@ def operador():
         WHERE operador = ? AND status = 'Ativa' 
         ORDER BY data_hora_inicio DESC""", (matricula,))
     
-    return render_template_string(BASE_TEMPLATE, 
+    anexos = query("""SELECT DISTINCT a.num_op, a.nome_arquivo FROM op_anexos a
+        JOIN ordens_producao o ON o.num_op = a.num_op
+        WHERE o.status_geral NOT IN ('Concluída','Cancelada')""") or []
+
+    return render_template_string(BASE_TEMPLATE,
         conteudo=render_template_string(OPERADOR_TEMPLATE,
             ativas=ativas, historico=historico, ops_disponiveis=ops_disponiveis,
             maquinas_disponiveis=maquinas_disponiveis, paradas_ativas=paradas_ativas,
+            anexos=anexos,
             session=session, login=LOGIN_TEMPLATE),
         aba='operador', session=session)
 
@@ -2743,6 +2790,19 @@ GERENCIAR_TEMPLATE = FASE_TEMPLATE_BASE + MODAL_CSS + """
 </div>
 {% else %}<p style="color:#78909c;font-size:12px;">Nenhum desenho.</p>{% endfor %}
 <p style="margin-top:16px;"><a class="btn btn-sm btn-secondary" href="/supervisor/auditoria" data-testid="btn-audit">📜 Ver Auditoria de Mudanças</a></p>
+
+<h4 style="margin-top:20px;">📎 Anexos de Desenho (por OP)</h4>
+<p style="font-size:11px;color:#78909c;margin-bottom:8px;">PDF ou imagem do desenho técnico. Aparece na tela do operador.</p>
+{% for op in ops_anexo %}
+<div class="list-row">
+  <div class="info"><b>OP {{ op.num_op }}</b>
+    <small>{% if op.nome_arquivo %}📎 {{ op.nome_arquivo }} · <a href="/anexo/{{ op.num_op }}" target="_blank" style="color:#4fc3f7;">visualizar</a>{% else %}sem anexo{% endif %}</small></div>
+  <form method="POST" action="/supervisor/op/{{ op.num_op }}/anexo" enctype="multipart/form-data" style="display:flex;gap:5px;align-items:center;" data-testid="form-anexo-{{ op.num_op }}">
+    <input type="file" name="arquivo" accept=".pdf,.png,.jpg,.jpeg,.webp,.gif" required style="font-size:11px;color:#78909c;max-width:180px;" data-testid="input-anexo-{{ op.num_op }}">
+    <button class="btn btn-sm btn-primary" data-testid="btn-upload-{{ op.num_op }}">⬆️</button>
+  </form>
+</div>
+{% else %}<p style="color:#78909c;font-size:12px;">Nenhuma OP aberta.</p>{% endfor %}
 </div>
 
 <!-- Modal Editar Operador -->
@@ -2912,9 +2972,13 @@ def supervisor_gerenciar():
         operadores = query("SELECT * FROM operadores WHERE ativo=1 ORDER BY nome") or []
         maquinas = query("SELECT * FROM maquinas ORDER BY codigo_maquina") or []
         desenhos = query("SELECT * FROM desenhos ORDER BY numero_desenho") or []
+    ops_anexo = query("""SELECT o.num_op, a.nome_arquivo FROM ordens_producao o
+        LEFT JOIN op_anexos a ON a.num_op = o.num_op
+        WHERE o.status_geral NOT IN ('Concluída','Cancelada') ORDER BY o.num_op""") or []
     return render_template_string(BASE_TEMPLATE,
         conteudo=render_template_string(GERENCIAR_TEMPLATE,
-            operadores=operadores, maquinas=maquinas, desenhos=desenhos, q=q),
+            operadores=operadores, maquinas=maquinas, desenhos=desenhos, q=q,
+            ops_anexo=ops_anexo),
         aba='ger', session=session)
 
 @app.route('/supervisor/historico')
@@ -2948,6 +3012,69 @@ def supervisor_historico():
             rows=rows, total=total, page=page, total_pages=total_pages,
             q=q, date_from=date_from, date_to=date_to, status=status, qs=qs),
         aba='hist', session=session)
+
+
+# ============================================
+# OBJECT STORAGE (desenhos técnicos anexados às OPs)
+# ============================================
+STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
+_storage_key_cache = {"key": None}
+
+def _env_key(name):
+    """Lê do ambiente ou do .env do backend (sem editar o arquivo)."""
+    v = os.environ.get(name)
+    if v:
+        return v
+    try:
+        with open(os.path.join(BASE_DIR, ".env")) as fh:
+            for line in fh:
+                if line.strip().startswith(name + "="):
+                    return line.split("=", 1)[1].strip().strip('"')
+    except Exception:
+        pass
+    return None
+
+def init_storage(force=False):
+    if _storage_key_cache["key"] and not force:
+        return _storage_key_cache["key"]
+    key = _env_key("EMERGENT_LLM_KEY")
+    if not key:
+        print("[storage] EMERGENT_LLM_KEY ausente")
+        return None
+    try:
+        r = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": key}, timeout=30)
+        r.raise_for_status()
+        _storage_key_cache["key"] = r.json()["storage_key"]
+        return _storage_key_cache["key"]
+    except Exception as e:
+        print(f"[storage] init falhou: {e}")
+        return None
+
+def put_object(path, data, content_type):
+    k = init_storage()
+    if not k:
+        raise Exception("Armazenamento indisponível")
+    r = requests.put(f"{STORAGE_URL}/objects/{path}",
+                     headers={"X-Storage-Key": k, "Content-Type": content_type},
+                     data=data, timeout=120)
+    if r.status_code in (403, 404):
+        k = init_storage(force=True)
+        r = requests.put(f"{STORAGE_URL}/objects/{path}",
+                         headers={"X-Storage-Key": k, "Content-Type": content_type},
+                         data=data, timeout=120)
+    r.raise_for_status()
+    return r.json() if r.content else {"path": path, "size": len(data)}
+
+def get_object(path):
+    k = init_storage()
+    if not k:
+        raise Exception("Armazenamento indisponível")
+    r = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": k}, timeout=60)
+    if r.status_code in (403, 404):
+        k = init_storage(force=True)
+        r = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": k}, timeout=60)
+    r.raise_for_status()
+    return r.content, r.headers.get("Content-Type", "application/octet-stream")
 
 
 # ============================================
@@ -3146,6 +3273,106 @@ def supervisor_vincular_google():
     log_audit('vincular_google', 'auth', email, f'matricula={matricula}')
     flash(f'🔗 {email} vinculado ao operador {matricula}.', 'success')
     return redirect(url_for('supervisor_gerenciar'))
+
+
+# ============================================
+# ANEXOS DE OP + PENDÊNCIAS + MANUAL
+# ============================================
+EXTENSOES_ANEXO = ('pdf', 'png', 'jpg', 'jpeg', 'webp', 'gif')
+
+@app.route('/supervisor/op/<num_op>/anexo', methods=['POST'])
+@login_required
+def supervisor_op_anexo(num_op):
+    f = request.files.get('arquivo')
+    if not f or not f.filename:
+        flash('Selecione um arquivo (PDF ou imagem).', 'danger')
+        return redirect(url_for('supervisor_gerenciar'))
+    ext = f.filename.rsplit('.', 1)[-1].lower() if '.' in f.filename else ''
+    if ext not in EXTENSOES_ANEXO:
+        flash('❌ Formato não suportado. Use PDF, PNG, JPG, WEBP ou GIF.', 'danger')
+        return redirect(url_for('supervisor_gerenciar'))
+    data = f.read()
+    if len(data) > 20 * 1024 * 1024:
+        flash('❌ Arquivo muito grande (máx. 20MB).', 'danger')
+        return redirect(url_for('supervisor_gerenciar'))
+    storage_path = f"profab-mes/desenhos/{num_op}/{secrets.token_hex(8)}.{ext}"
+    try:
+        res = put_object(storage_path, data, f.content_type or 'application/octet-stream')
+    except Exception as e:
+        flash(f'❌ Falha no upload: {e}', 'danger')
+        return redirect(url_for('supervisor_gerenciar'))
+    query("DELETE FROM op_anexos WHERE num_op = ?", (num_op,), commit=True)
+    query("""INSERT INTO op_anexos (num_op, nome_arquivo, storage_path, content_type, enviado_por)
+             VALUES (?, ?, ?, ?, ?)""",
+          (num_op, f.filename, res.get('path', storage_path), f.content_type or 'application/octet-stream',
+           session.get('matricula')), commit=True)
+    log_audit('upload_anexo', 'op', num_op, f.filename)
+    flash(f'📎 Desenho anexado à OP {num_op}.', 'success')
+    return redirect(url_for('supervisor_gerenciar'))
+
+@app.route('/anexo/<num_op>')
+@login_required
+def ver_anexo(num_op):
+    a = query("SELECT * FROM op_anexos WHERE num_op = ? ORDER BY id DESC LIMIT 1", (num_op,), one=True)
+    if not a:
+        flash('Nenhum desenho anexado a esta OP.', 'info')
+        return redirect(url_for('operador'))
+    data, ct = get_object(a['storage_path'])
+    import mimetypes
+    mt = a['content_type'] or mimetypes.guess_type(a['nome_arquivo'])[0] or 'application/octet-stream'
+    return send_file(io.BytesIO(data), mimetype=mt, download_name=a['nome_arquivo'])
+
+@app.route('/pendencias/count')
+def pendencias_count():
+    r = query("SELECT COUNT(*) as c FROM apontamentos WHERE status_aprovacao = 'pendente' OR auto_fechado = 1", one=True)
+    return jsonify({'count': r['c'] if r else 0})
+
+MANUAL_TEMPLATE = FASE_TEMPLATE_BASE + """
+<div class="card"><h3>📖 Manual do Sistema</h3>
+
+<h4>🔐 1. Acesso ao Sistema</h4>
+<table class="rep">
+<tr><td><b>Google</b></td><td>Clique em <b>🔵 Entrar com Google</b> na tela de login. O dono do app ({{ owner_email }}) entra automaticamente como <b>supervisor</b>. Outros e-mails precisam ser vinculados a uma matrícula pelo supervisor (tela ⚙️ Gerenciar).</td></tr>
+<tr><td><b>Matrícula</b></td><td>Caminho tradicional: matrícula (ex: 1024) + senha. Senhas são guardadas com bcrypt.</td></tr>
+</table>
+
+<h4>🧑‍🔧 2. Rotina do Operador</h4>
+<table class="rep">
+<tr><td>① Iniciar</td><td>Na aba 🧑‍🔧 OP, escolha a <b>OP e etapa</b>, a <b>máquina</b> e clique <b>▶ Iniciar</b>. O cronômetro verde começa a rodar e fica visível o tempo todo.</td></tr>
+<tr><td>② Durante</td><td>Se a máquina parar, use <b>🔴 Disparar Parada</b> escolhendo o motivo. Paradas com ≥ {{ min_stop }} min exigem comentário ao retomar.</td></tr>
+<tr><td>③ Fechar</td><td>Clique <b>📦 Fechar</b>, informe <b>peças boas</b> e <b>refugo</b>. Se o refugo passar do saldo da OP, escreva a <b>justificativa</b> — o apontamento vai para aprovação do supervisor.</td></tr>
+<tr><td>④ Desenho</td><td>No cartão <b>📎 Desenho da OP</b>, abra o PDF/imagem do desenho técnico anexado pelo supervisor.</td></tr>
+</table>
+
+<h4>👮 3. Rotina do Supervisor / PCP</h4>
+<table class="rep">
+<tr><td>✅ Fila</td><td>Apontamentos com refugo acima do saldo ou fechados automaticamente aparecem aqui. O <b>badge vermelho piscando</b> no menu mostra a quantidade pendente. Aprove ✔️ para descontar o saldo ou rejeite ✖️.</td></tr>
+<tr><td>🌙 Fim de turno</td><td>Use <b>Executar Fechamento Automático</b> na Fila para fechar tudo que ficou aberto (vai para validação).</td></tr>
+<tr><td>📋 PCP</td><td>Crie OPs com roteiro de etapas, máquina e quantidade.</td></tr>
+<tr><td>📊 Relat.</td><td>OEE por máquina, Pareto de paradas, Aging de OPs e Produtividade — com filtros de período/máquina e exportação em <b>CSV, Excel e PDF</b>.</td></tr>
+<tr><td>⚙️ Gerenciar</td><td>Cadastre/editar operadores (✏️), reset de senha (🔑), máquinas, desenhos, <b>anexo de desenho na OP</b> (📎) e vínculos Google.</td></tr>
+<tr><td>❤️ Saúde</td><td>Tamanho do DB, pendências, último backup. <b>Alerta vermelho</b> se o backup tiver mais de 24h — o backup também roda sozinho quando atrasa.</td></tr>
+<tr><td>📚 Histórico</td><td>Todos os apontamentos com busca, filtro de período/status e paginação.</td></tr>
+<tr><td>📜 Auditoria</td><td>Em Gerenciar → ver quem editou o quê, com o valor antes → depois.</td></tr>
+</table>
+
+<h4>💡 Dicas</h4>
+<table class="rep">
+<tr><td>🔒</td><td>Sessão do Google dura 7 dias; depois basta entrar com Google de novo.</td></tr>
+<tr><td>💾</td><td>Backup automático: no login do sistema e sempre que o último tiver mais de 24h.</td></tr>
+<tr><td>📱</td><td>O sistema funciona em tablet/celular do chão de fábrica — os cronômetros e botões são grandes de propósito.</td></tr>
+</table>
+</div>
+"""
+
+@app.route('/manual')
+@login_required
+def manual():
+    return render_template_string(BASE_TEMPLATE,
+        conteudo=render_template_string(MANUAL_TEMPLATE,
+            owner_email=OWNER_EMAIL,
+            min_stop=get_config('min_stoppage_comment_min', '15')),
+        aba='manual', session=session)
 
 
 if __name__ == '__main__':

@@ -12,29 +12,23 @@ DEBUG/SECRET_KEY via env, bcrypt com upgrade transparente SHA256, WAL, `audit_lo
 Justificativa obrigatória para refugo > saldo (fila `pendente`), cronômetro visível JS, fechamento automático fim de turno, fila de validação em `/supervisor/fila`.
 
 ### Fase 3 — Relatórios (2026-02) ✅
-`/supervisor/relatorios` — OEE por máquina, Pareto paradas, Aging OPs, Produtividade por operador, filtros período+máquina.
+`/supervisor/relatorios` — OEE, Pareto, Aging, Produtividade, filtros período+máquina, export CSV/XLSX/PDF.
 
 ### Painel de Saúde (2026-02) ✅
-`/supervisor/saude` — tamanho DB, apontamentos abertos, pendentes aprovação, último backup, config editável, alerta vermelho se backup >24h.
+Métricas do sistema, config editável, alerta vermelho se backup >24h + backup automático via before_request.
 
 ### Fase 4 — Modais + Busca + Paginação (2026-02) ✅
-`/supervisor/gerenciar` (CRUD+edição em modais, busca, reset senha, vínculo Google), `/supervisor/historico` (paginado, filtros), `/supervisor/auditoria` (log de mudanças com diff).
-
-### Exportação + Backup agendado (2026-09) ✅
-`/supervisor/export/<kind>/{xlsx,pdf}` (8 endpoints), botões nos relatórios, `before_request` de backup automático >24h.
+`/supervisor/gerenciar` (CRUD+edição modais, busca, reset senha), `/supervisor/historico` (paginado), `/supervisor/auditoria`.
 
 ### Google Sign-In — Emergent managed OAuth (2026-09) ✅
-- Botão "Entrar com Google" no login → `auth.emergentagent.com` com redirect dinâmico `window.location.origin + '/auth/google/landing'` (sem hardcode, com comentário REMINDER no código)
-- `/auth/google/landing`: página JS processa fragment `#session_id` e chama `POST /auth/google/session`
-- `/auth/google/session`: troca server-side via `demobackend.emergentagent.com/auth/v1/env/oauth/session-data` (header `X-Session-ID`), resolve matrícula via `google_vinculos` (email→matrícula), OWNER_EMAIL (martinsdesiqueiraigor@gmail.com) auto-provisionado como supervisor
-- Sessão: `user_sessions` (token, expiry 7d timezone-aware) + cookie `session_token` httpOnly/secure/samesite=None
-- `@app.before_request load_session_from_cookie()`: restaura sessão Flask do cookie em TODAS as rotas
-- Logout: limpa sessão Flask + cookie + registro em `user_sessions`
-- E-mails sem vínculo: 403 com instrução para o supervisor vincular em Gerenciar
-- Validado: cookie de teste abre todas as páginas protegidas (operador, pcp, supervisor, fila, gerenciar, saúde), logout remove sessão do DB, sem cookie → redirect /login
+Fluxo completo com vínculo email→matrícula, OWNER auto-supervisor, cookie 7d, before_request global.
+
+### Anexos de Desenho + Badge + Manual (2026-09) ✅
+- **Anexos**: tabela `op_anexos`; upload em `/supervisor/op/<num_op>/anexo` (PDF/PNG/JPG/WEBP/GIF, máx 20MB) via **Emergent Object Storage** (`put_object`/`get_object` com re-init em 403/404); stream em `/anexo/<num_op>` (inline). Supervisor anexa em ⚙️ Gerenciar → 📎 Anexos; operador visualiza no card "📎 Desenho da OP" com dropdown de OPs.
+- **Badge tempo real**: `/pendencias/count` (JSON) + JS poll 30s no BASE_TEMPLATE → badge vermelho pulsante no link "Fila" com contagem de pendentes.
+- **Manual**: `/manual` (login_required) — passo a passo de acesso (Google/matrícula), rotina do operador, rotina do supervisor/PCP, dicas. Link "📖 Manual" no menu.
 
 ## Backlog
-- Tela/UX para o supervisor vincular e-mails Google (rota pronta, falta UI no gerenciar)
-- Toasts de pendências em tempo real (poll ou SSE)
-- Manual curto operador/supervisor
-- Anexo de arquivo no desenho (object storage)
+- UX de vínculo Google em modal (rota pronta: /supervisor/vincular-google)
+- Toasts de pendências em tempo real (SSE)
+- Miniatura do desenho na tela do operador (hoje abre em nova aba)
