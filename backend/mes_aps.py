@@ -98,10 +98,11 @@ def load_session_from_cookie():
         if exp < datetime.now(timezone.utc):
             return
         session['matricula'] = r['matricula']
-        op = query("SELECT nome, turno FROM operadores WHERE matricula = ?", (r['matricula'],), one=True)
+        op = query("SELECT nome, turno, papel FROM operadores WHERE matricula = ?", (r['matricula'],), one=True)
         if op:
             session['nome'] = op['nome']
             session['turno'] = op['turno']
+            session['papel'] = op['papel'] or 'operador'
     except Exception:
         pass
 
@@ -836,19 +837,39 @@ BASE_TEMPLATE = """
         setInterval(updateChronos, 1000);
         updateChronos();
 
-        // Badge de pendências em tempo real (poll 30s)
+        // Badge de pendências em tempo real (poll 30s) + alerta sonoro p/ supervisor
+        var isSup = {{ 'true' if (session.get('papel') == 'supervisor') else 'false' }};
+        var lastPend = null;
+        function beepPendencia(){
+            try{
+                var ctx = new (window.AudioContext || window.webkitAudioContext)();
+                var o = ctx.createOscillator(), g = ctx.createGain();
+                o.connect(g); g.connect(ctx.destination);
+                o.type = 'sine'; o.frequency.value = 880;
+                g.gain.setValueAtTime(0.15, ctx.currentTime);
+                g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
+                o.start(); o.stop(ctx.currentTime + 0.6);
+            }catch(e){}
+        }
         function updateBadgeFila(){
             fetch('/pendencias/count').then(function(r){return r.json()})
             .then(function(j){
                 var b=document.getElementById('badge-fila');
-                if(!b) return;
-                if(j.count>0){b.textContent=j.count;b.style.display='inline-block';}
-                else{b.style.display='none';}
+                if(b){
+                    if(j.count>0){b.textContent=j.count;b.style.display='inline-block';}
+                    else{b.style.display='none';}
+                }
+                // Toca apenas quando surge pendência NOVA e o usuário é supervisor
+                if(isSup && lastPend !== null && j.count > lastPend){ beepPendencia(); }
+                lastPend = j.count;
             }).catch(function(){});
         }
         setInterval(updateBadgeFila, 30000);
         updateBadgeFila();
     </script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</body>
+</html>
 </body>
 </html>
 """
@@ -933,15 +954,37 @@ OPERADOR_TEMPLATE = """
         <h3>📎 Desenho da OP</h3>
         {% if anexos %}
         <div class="form-group">
-            <label>Ver desenho técnico (PDF/imagem)</label>
-            <select id="sel-anexo" data-testid="select-anexo-op">
+            <label>Desenho técnico (PDF/imagem)</label>
+            <select id="sel-anexo" data-testid="select-anexo-op" onchange="updAnexo()">
                 {% for a in anexos %}
-                <option value="/anexo/{{ a.num_op }}">OP {{ a.num_op }} — {{ a.nome_arquivo }}</option>
+                <option value="/anexo/{{ a.num_op }}" data-img="{{ '1' if (a.content_type or '').startswith('image/') else '' }}">OP {{ a.num_op }} — {{ a.nome_arquivo }}</option>
                 {% endfor %}
             </select>
         </div>
-        <a class="btn btn-primary touch-btn" id="btn-ver-anexo" data-testid="btn-ver-anexo" href="/anexo/{{ anexos[0].num_op }}" target="_blank"
-           onclick="this.href=document.getElementById('sel-anexo').value">👁️ Visualizar Desenho</a>
+        <div id="anexo-preview" style="text-align:center;margin-bottom:10px;">
+            <img id="anexo-img" src="/anexo/{{ anexos[0].num_op }}" alt="Prévia do desenho" data-testid="img-preview-desenho"
+                 style="max-width:100%;max-height:280px;border-radius:8px;border:1px solid #1a2a3a;display:{{ 'block' if (anexos[0].content_type or '').startswith('image/') else 'none' }};">
+            <div id="anexo-pdf" style="display:{{ 'none' if (anexos[0].content_type or '').startswith('image/') else 'block' }};padding:24px;background:#0d1b2a;border-radius:8px;border:1px solid #1a2a3a;">
+                <span style="font-size:36px;">📄</span>
+                <div style="font-size:11px;color:#78909c;margin-top:6px;">Documento PDF — use o botão abaixo para abrir</div>
+            </div>
+        </div>
+        <a class="btn btn-primary touch-btn" id="btn-ver-anexo" data-testid="btn-ver-anexo" href="/anexo/{{ anexos[0].num_op }}" target="_blank">👁️ Abrir em nova aba / ampliar</a>
+        <script>
+        function updAnexo(){
+            var sel = document.getElementById('sel-anexo');
+            if(!sel || !sel.options[sel.selectedIndex]) return;
+            var opt = sel.options[sel.selectedIndex];
+            var isImg = opt.dataset.img === '1';
+            var img = document.getElementById('anexo-img');
+            var pdf = document.getElementById('anexo-pdf');
+            img.style.display = isImg ? 'block' : 'none';
+            pdf.style.display = isImg ? 'none' : 'block';
+            if(isImg) img.src = sel.value;
+            document.getElementById('btn-ver-anexo').href = sel.value;
+        }
+        updAnexo();
+        </script>
         {% else %}
         <p style="font-size:12px;color:#78909c;">Nenhum desenho anexado ainda. O supervisor pode anexar em ⚙️ Gerenciar → 📎 Anexos.</p>
         {% endif %}
@@ -1626,6 +1669,7 @@ def login():
                 session['matricula'] = operador['matricula']
                 session['nome'] = operador['nome']
                 session['turno'] = operador['turno']
+                session['papel'] = operador['papel'] or 'operador'
                 # upgrade transparente para bcrypt em contas legadas SHA256
                 upgrade_senha_se_legado(operador['matricula'], senha, operador['senha'])
                 log_audit('login', 'sessao', operador['matricula'])
@@ -1686,7 +1730,7 @@ def operador():
         WHERE operador = ? AND status = 'Ativa' 
         ORDER BY data_hora_inicio DESC""", (matricula,))
     
-    anexos = query("""SELECT DISTINCT a.num_op, a.nome_arquivo FROM op_anexos a
+    anexos = query("""SELECT DISTINCT a.num_op, a.nome_arquivo, a.content_type FROM op_anexos a
         JOIN ordens_producao o ON o.num_op = a.num_op
         WHERE o.status_geral NOT IN ('Concluída','Cancelada')""") or []
 
@@ -2396,6 +2440,7 @@ RELATORIOS_TEMPLATE = FASE_TEMPLATE_BASE + """
   <a class="btn btn-sm btn-secondary" href="/supervisor/export/produtividade/pdf" data-testid="btn-export-prod-pdf">⬇ Prod. PDF</a>
 </form>
 <h4>🎯 OEE por Máquina</h4>
+<canvas id="chartOee" height="120" data-testid="chart-oee"></canvas>
 <table class="rep">
 <tr><th>Máquina</th><th>Disponib.</th><th>Perform.</th><th>Qualidade</th><th>OEE</th></tr>
 {% for r in oee %}<tr>
@@ -2405,6 +2450,7 @@ RELATORIOS_TEMPLATE = FASE_TEMPLATE_BASE + """
 </tr>{% else %}<tr><td colspan="5" style="text-align:center;color:#78909c;">Sem dados</td></tr>{% endfor %}
 </table>
 <h4 style="margin-top:20px;">⏱️ Pareto de Paradas</h4>
+<canvas id="chartPareto" height="140" data-testid="chart-pareto"></canvas>
 <table class="rep">
 <tr><th>Motivo</th><th>Min. Perdidos</th><th>% Isolado</th><th>% Acumulado</th></tr>
 {% for p in pareto %}<tr>
@@ -2414,6 +2460,7 @@ RELATORIOS_TEMPLATE = FASE_TEMPLATE_BASE + """
 </tr>{% else %}<tr><td colspan="4" style="text-align:center;color:#78909c;">Sem paradas registradas</td></tr>{% endfor %}
 </table>
 <h4 style="margin-top:20px;">📅 Aging de OPs</h4>
+<canvas id="chartAging" height="140" data-testid="chart-aging"></canvas>
 <table class="rep">
 <tr><th>OP</th><th>Desenho</th><th>Status</th><th>Dias Aberta</th><th>Meta</th><th>Saldo</th><th>%</th></tr>
 {% for a in aging %}<tr>
@@ -2425,6 +2472,7 @@ RELATORIOS_TEMPLATE = FASE_TEMPLATE_BASE + """
 </tr>{% else %}<tr><td colspan="7" style="text-align:center;color:#78909c;">Sem OPs abertas</td></tr>{% endfor %}
 </table>
 <h4 style="margin-top:20px;">👷 Produtividade por Operador</h4>
+<canvas id="chartProd" height="120" data-testid="chart-prod"></canvas>
 <table class="rep">
 <tr><th>Operador</th><th>Boas</th><th>Refugo</th><th>% Refugo</th><th>Peças/h</th></tr>
 {% for p in produtividade %}<tr>
@@ -2432,6 +2480,61 @@ RELATORIOS_TEMPLATE = FASE_TEMPLATE_BASE + """
   <td>{{ p.pct_refugo }}%</td><td>{{ p.pph }}</td>
 </tr>{% else %}<tr><td colspan="5" style="text-align:center;color:#78909c;">Sem dados</td></tr>{% endfor %}
 </table></div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+(function(){
+  var GRID = {color:'rgba(148,163,184,.15)'};
+  var TICKS = {color:'#94a3b8', font:{size:11}};
+  var LEGEND = {labels:{color:'#e2e8f0', font:{size:11}}};
+
+  var oee = {{ oee|tojson }};
+  if(oee.length){
+    new Chart(document.getElementById('chartOee'), {type:'bar',
+      data:{labels:oee.map(function(r){return r.maquina}),
+        datasets:[
+          {label:'Disponibilidade %', data:oee.map(function(r){return r.availability}), backgroundColor:'#4fc3f7'},
+          {label:'Performance %', data:oee.map(function(r){return r.performance}), backgroundColor:'#f59e0b'},
+          {label:'Qualidade %', data:oee.map(function(r){return r.quality}), backgroundColor:'#10b981'},
+          {label:'OEE %', data:oee.map(function(r){return r.oee}), backgroundColor:'#6366f1'}]},
+      options:{plugins:{legend:LEGEND, tooltip:{callbacks:{label:function(c){return c.dataset.label+': '+c.parsed.y+'%'}}}},
+        scales:{x:{ticks:TICKS, grid:GRID}, y:{ticks:TICKS, grid:GRID, beginAtZero:true, max:100}}}});
+  }
+
+  var par = {{ pareto|tojson }};
+  if(par.length){
+    new Chart(document.getElementById('chartPareto'), {
+      data:{labels:par.map(function(p){return p.motivo}),
+        datasets:[
+          {type:'bar', label:'Minutos parados', data:par.map(function(p){return p.minutos}), backgroundColor:'#ef4444'},
+          {type:'line', label:'% acumulado', data:par.map(function(p){return p.cumulativa}),
+           borderColor:'#4fc3f7', backgroundColor:'#4fc3f7', tension:0.3, yAxisID:'y1'}]},
+      options:{plugins:{legend:LEGEND}, scales:{
+        x:{ticks:TICKS, grid:GRID},
+        y:{ticks:TICKS, grid:GRID, beginAtZero:true, title:{display:true,text:'min',color:'#94a3b8'}},
+        y1:{position:'right', min:0, max:100, ticks:{color:'#4fc3f7'}, grid:{drawOnChartArea:false}, title:{display:true,text:'% acum.',color:'#4fc3f7'}}}}});
+  }
+
+  var ag = {{ aging|tojson }};
+  if(ag.length){
+    new Chart(document.getElementById('chartAging'), {type:'bar',
+      data:{labels:ag.map(function(a){return a.num_op}),
+        datasets:[{label:'Dias em aberto (vermelho = atrasada)', data:ag.map(function(a){return a.age}),
+          backgroundColor:ag.map(function(a){return a.overdue ? '#ef4444' : '#10b981'})}]},
+      options:{indexAxis:'y', plugins:{legend:{display:false}},
+        scales:{x:{ticks:TICKS, grid:GRID, beginAtZero:true}, y:{ticks:{color:'#e2e8f0', font:{size:10}}, grid:GRID}}}});
+  }
+
+  var pr = {{ produtividade|tojson }};
+  if(pr.length){
+    new Chart(document.getElementById('chartProd'), {type:'bar',
+      data:{labels:pr.map(function(p){return p.nome}),
+        datasets:[
+          {label:'Peças/h', data:pr.map(function(p){return p.pph}), backgroundColor:'#4fc3f7'},
+          {label:'% Refugo', data:pr.map(function(p){return p.pct_refugo}), backgroundColor:'#f59e0b'}]},
+      options:{plugins:{legend:LEGEND}, scales:{x:{ticks:TICKS, grid:GRID}, y:{ticks:TICKS, grid:GRID, beginAtZero:true}}}});
+  }
+})();
+</script>
 """
 
 @app.route('/supervisor/fila')
