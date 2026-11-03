@@ -1124,12 +1124,17 @@ PCP_TEMPLATE = """
     <h3>📊 OPs em Andamento</h3>
     {% if ops %}
     <table class="table">
-        <thead><tr><th>OP</th><th>Meta</th><th>Progresso</th><th>Ações</th></tr></thead>
+        <thead><tr><th>OP</th><th>Meta</th><th>Fases</th><th>Progresso</th><th>Ações</th></tr></thead>
         <tbody>
         {% for op in ops %}
         <tr>
             <td><strong>{{ op.num_op }}</strong></td>
             <td>{{ op.meta_total }}</td>
+            <td data-testid="pcp-fases-{{ op.num_op }}">
+                {% for f in fases_por_op.get(op.num_op, []) %}
+                <span title="Etapa {{ f.numero_etapa }} - {{ f.descricao_etapa }}: {{ f.estado }}" style="display:inline-block;padding:2px 6px;margin:1px;border-radius:4px;font-size:10px;font-weight:700;background:{{ '#065f46' if f.estado == 'Concluída' else ('#b45309' if f.estado == 'Em produção' else '#1e293b') }};color:#fff;">{{ f.numero_etapa }} {{ f.descricao_etapa[:10] }}</span>
+                {% endfor %}
+            </td>
             <td>
                 {% set progresso = ((op.meta_total - op.saldo_total) / op.meta_total * 100)|round(0) if op.meta_total > 0 else 0 %}
                 <div class="progress-bar">
@@ -1138,6 +1143,7 @@ PCP_TEMPLATE = """
                 <span style="font-size:10px;color:#78909c;">{{ progresso if progresso >= 0 else 0 }}%</span>
             </td>
             <td>
+                <a href="/pcp/acompanhar/{{ op.num_op }}" data-testid="pcp-acompanhar-{{ op.num_op }}" class="btn btn-sm btn-primary" style="display:inline-block;width:auto;padding:3px 8px;text-decoration:none;">🎯 Fases</a>
                 <a href="/pcp/imprimir/{{ op.num_op }}" target="_blank" class="btn btn-sm btn-info" style="display:inline-block;width:auto;padding:3px 8px;text-decoration:none;">🖨️</a>
             </td>
         </tr>
@@ -1873,9 +1879,14 @@ def pcp():
         WHERE o.status_geral != 'Concluída' 
         GROUP BY o.num_op 
         ORDER BY o.data_criacao""")
+    ativos = {(r['num_op'], r['numero_etapa']) for r in (query("SELECT num_op, numero_etapa FROM apontamentos WHERE qtd_boas IS NULL AND status='Ativo'") or [])}
+    fases_por_op = {}
+    for e in query("SELECT * FROM op_etapas_execucao ORDER BY num_op, numero_etapa") or []:
+        estado = 'Concluída' if e['status_execucao'] == 'Concluída' else ('Em produção' if (e['num_op'], e['numero_etapa']) in ativos else 'Pendente')
+        fases_por_op.setdefault(e['num_op'], []).append({'numero_etapa': e['numero_etapa'], 'descricao_etapa': e['descricao_etapa'] or '', 'estado': estado})
     
     return render_template_string(BASE_TEMPLATE, 
-        conteudo=render_template_string(PCP_TEMPLATE, desenhos=desenhos, ops=ops),
+        conteudo=render_template_string(PCP_TEMPLATE, desenhos=desenhos, ops=ops, fases_por_op=fases_por_op),
         aba='pcp', session=session)
 
 @app.route('/pcp/nova', methods=['POST'])
@@ -3476,6 +3487,112 @@ def manual():
             owner_email=OWNER_EMAIL,
             min_stop=get_config('min_stoppage_comment_min', '15')),
         aba='manual', session=session)
+
+
+# ============================================
+# ACOMPANHAMENTO DE OP POR FASE (PCP)
+# ============================================
+
+ACOMPANHAR_TEMPLATE = FASE_TEMPLATE_BASE + MODAL_CSS + """
+<div class="card">
+  <h3>🎯 Acompanhamento da OP {{ op.num_op }}</h3>
+  <div class="row-flex">
+    <div class="metric"><div class="v">{{ op.numero_desenho }}</div><div class="l">Desenho</div></div>
+    <div class="metric ok"><div class="v">{{ progresso_total }}%</div><div class="l">Progresso Total</div></div>
+    <div class="metric"><div class="v">{{ op.meta_total }}</div><div class="l">Meta (peças)</div></div>
+    <div class="metric warn"><div class="v">{{ saldo_total }}</div><div class="l">Saldo nas Fases</div></div>
+    <div class="metric"><div class="v" style="font-size:14px;">{{ op.data_criacao }}</div><div class="l">Criada em</div></div>
+  </div>
+  <a class="btn btn-sm btn-info" href="/pcp" data-testid="acompanhar-voltar-btn" style="display:inline-block;width:auto;text-decoration:none;margin-top:10px;padding:6px 12px;">← Voltar ao PCP</a>
+</div>
+
+<div class="card">
+  <h3>🛤️ Fases da OP (Roteiro)</h3>
+  {% for e in fases %}
+  <div class="list-row" data-testid="fase-{{ e.numero_etapa }}" style="border-left:4px solid {{ '#10b981' if e.status == 'Concluída' else ('#f59e0b' if e.em_producao else '#334155') }};">
+    <div class="info">
+      <b>Etapa {{ e.numero_etapa }} — {{ e.descricao }}</b>
+      <small>
+        {% if e.status == 'Concluída' %}<span class="badge b-ok">✅ Concluída</span>
+        {% elif e.em_producao %}<span class="badge b-pend">🔄 Em produção</span>
+        {% else %}<span class="badge b-late">⏳ Pendente</span>{% endif %}
+        {% if e.em_producao %}
+          &nbsp;· <span class="pulse-dot" style="color:#10b981;">●</span>
+          {% for a in e.ativos %}{{ a.nome or a.operador }} ({{ a.codigo_maquina }}){% if not loop.last %}, {% endif %}{% endfor %}
+        {% endif %}
+      </small>
+      {% if e.pendentes > 0 %}<small style="color:#c7d2fe;">⚠️ {{ e.pendentes }} apontamento(s) aguardando validação</small>{% endif %}
+    </div>
+    <div style="text-align:right;min-width:140px;">
+      <div style="font-family:monospace;font-size:13px;color:#e2e8f0;">{{ e.produzidas }} feitas · {{ e.refugo }} refugo</div>
+      <div class="bar" style="margin-top:4px;width:140px;"><span style="width:{{ e.pct }}%"></span></div>
+      <small style="color:#78909c;font-size:10px;">{{ e.pct }}% da fase</small>
+    </div>
+  </div>
+  {% else %}<p style="color:#78909c;font-size:12px;">OP sem roteiro de fases.</p>{% endfor %}
+</div>
+
+<div class="card">
+  <h3>📜 Histórico de Apontamentos desta OP</h3>
+  <div style="overflow-x:auto;"><table class="rep" data-testid="acompanhar-historico">
+  <tr><th>Etapa</th><th>Operador</th><th>Máquina</th><th>Boas</th><th>Refugo</th><th>Início</th><th>Fim</th><th>Status</th></tr>
+  {% for h in historico %}
+  <tr>
+    <td>{{ h.numero_etapa }}</td><td>{{ h.nome_op or h.operador }}</td><td>{{ h.codigo_maquina }}</td>
+    <td>{{ h.qtd_boas or '-' }}</td><td>{{ h.refugo or 0 }}</td>
+    <td style="font-size:11px;">{{ (h.data_hora_inicio or '')[:16] }}</td>
+    <td style="font-size:11px;">{{ (h.data_hora_fim or '')[:16] if h.data_hora_fim else '<b style=color:#10b981>EM CURSO</b>'|safe }}</td>
+    <td><span class="badge {% if (h.status_aprovacao or 'ok')=='pendente' %}b-pend{% elif h.status_aprovacao=='rejeitado' %}b-late{% else %}b-ok{% endif %}">{{ h.status_aprovacao or 'ok' }}</span></td>
+  </tr>
+  {% else %}<tr><td colspan="8" style="text-align:center;color:#78909c;padding:20px;">Nenhum apontamento ainda</td></tr>{% endfor %}
+  </table></div>
+</div>
+"""
+
+@app.route('/pcp/acompanhar/<num_op>')
+@login_required
+def pcp_acompanhar(num_op):
+    op = query("SELECT * FROM ordens_producao WHERE num_op = ?", (num_op,), one=True)
+    if not op:
+        flash('OP não encontrada', 'danger')
+        return redirect(url_for('pcp'))
+
+    etapas_rows = query("SELECT * FROM op_etapas_execucao WHERE num_op = ? ORDER BY numero_etapa", (num_op,)) or []
+    resumo = {r['numero_etapa']: r for r in (query("""
+        SELECT numero_etapa, COALESCE(SUM(qtd_boas),0) as produzidas, COALESCE(SUM(refugo),0) as refugo,
+               COALESCE(SUM(CASE WHEN status_aprovacao='pendente' THEN 1 ELSE 0 END),0) as pendentes
+        FROM apontamentos WHERE num_op = ? GROUP BY numero_etapa""", (num_op,)) or [])}
+    ativos = query("""SELECT a.numero_etapa, a.operador, o.nome, a.codigo_maquina
+        FROM apontamentos a LEFT JOIN operadores o ON o.matricula = a.operador
+        WHERE a.num_op = ? AND a.qtd_boas IS NULL AND a.status = 'Ativo'""", (num_op,)) or []
+
+    fases = []
+    for e in etapas_rows:
+        r = resumo.get(e['numero_etapa'], {'produzidas': 0, 'refugo': 0, 'pendentes': 0})
+        total_fase = (r['produzidas'] or 0) + (r['refugo'] or 0) + (e['saldo_residual'] or 0)
+        pct = round((r['produzidas'] or 0) / total_fase * 100, 1) if total_fase else 0
+        fases.append({
+            'numero_etapa': e['numero_etapa'], 'descricao': e['descricao_etapa'],
+            'status': e['status_execucao'], 'saldo': e['saldo_residual'],
+            'produzidas': r['produzidas'], 'refugo': r['refugo'], 'pendentes': r['pendentes'],
+            'pct': pct, 'total_fase': total_fase,
+            'em_producao': any(a['numero_etapa'] == e['numero_etapa'] for a in ativos),
+            'ativos': [a for a in ativos if a['numero_etapa'] == e['numero_etapa']],
+        })
+
+    saldo_total = sum(f['saldo'] for f in fases)
+    trabalho = (op['meta_total'] or 0) * len(fases)
+    progresso_total = round(max(0, min(100, (trabalho - saldo_total) / trabalho * 100)), 1) if trabalho else 0
+
+    historico = query("""SELECT a.*, o.nome as nome_op FROM apontamentos a
+        LEFT JOIN operadores o ON o.matricula = a.operador
+        WHERE a.num_op = ? ORDER BY a.data_hora_inicio DESC LIMIT 40""", (num_op,)) or []
+
+    return render_template_string(BASE_TEMPLATE,
+        conteudo=render_template_string(ACOMPANHAR_TEMPLATE,
+            op=op, fases=fases, historico=historico,
+            saldo_total=saldo_total, progresso_total=progresso_total),
+        aba='pcp', session=session)
 
 
 if __name__ == '__main__':

@@ -31,6 +31,11 @@ Anexos via Emergent Object Storage (`/supervisor/op/<num_op>/anexo`, stream `/an
 - **Notificação sonora**: WebAudio beep quando pendências AUMENTAM na fila — apenas para sessões com papel supervisor (`session['papel']` setado no form-login e no hook de cookie)
 - **Gráficos Chart.js** (CDN) nos relatórios: OEE (barras agrupadas), Pareto (barra+linha % acumulada, eixo y1), Aging (barras horizontais, vermelho=atrasada), Produtividade (peças/h + %refugo) — com tooltip e legenda, mantendo tabelas de dados
 
+
+## 2026-11-03 — PCP acompanha OP fase a fase
+- `/pcp`: coluna "Fases" com etiquetas por etapa (verde concluída, laranja em produção, cinza pendente) + botão "🎯 Fases"
+- `/pcp/acompanhar/<num_op>`: progresso total (trabalho de todas as fases), saldo, cada etapa com status, operador/máquina ativos, peças boas/refugo, % da fase, pendências de validação e histórico dos últimos 40 apontamentos
+
 ## Backlog
 - UI de vínculo Google em modal (rota pronta)
 - Notificações SSE em vez de poll
