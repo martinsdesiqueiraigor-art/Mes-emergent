@@ -36,6 +36,11 @@ Anexos via Emergent Object Storage (`/supervisor/op/<num_op>/anexo`, stream `/an
 - `/pcp`: coluna "Fases" com etiquetas por etapa (verde concluída, laranja em produção, cinza pendente) + botão "🎯 Fases"
 - `/pcp/acompanhar/<num_op>`: progresso total (trabalho de todas as fases), saldo, cada etapa com status, operador/máquina ativos, peças boas/refugo, % da fase, pendências de validação e histórico dos últimos 40 apontamentos
 
+## 2026-11-08 — Alerta de fase parada + Previsão de entrega
+- Fase parada: fase não concluída, sem produção em curso, que é a fase atual ou já teve apontamento, sem atividade há ≥ 8h (`LIMITE_FASE_PARADA_H`) → etiqueta/linha vermelha 🛑 no PCP e alerta na tela de fases
+- Previsão: soma(saldo da fase × tempo de ciclo do roteiro) ÷ 16h produtivas/dia (`HORAS_PRODUTIVAS_DIA`) → coluna "Previsão" no PCP e card na tela de fases
+
+
 ## Backlog
 - UI de vínculo Google em modal (rota pronta)
 - Notificações SSE em vez de poll

@@ -1124,15 +1124,16 @@ PCP_TEMPLATE = """
     <h3>📊 OPs em Andamento</h3>
     {% if ops %}
     <table class="table">
-        <thead><tr><th>OP</th><th>Meta</th><th>Fases</th><th>Progresso</th><th>Ações</th></tr></thead>
+        <thead><tr><th>OP</th><th>Meta</th><th>Fases</th><th>Progresso</th><th>Previsão</th><th>Ações</th></tr></thead>
         <tbody>
         {% for op in ops %}
         <tr>
             <td><strong>{{ op.num_op }}</strong></td>
             <td>{{ op.meta_total }}</td>
             <td data-testid="pcp-fases-{{ op.num_op }}">
-                {% for f in fases_por_op.get(op.num_op, []) %}
-                <span title="Etapa {{ f.numero_etapa }} - {{ f.descricao_etapa }}: {{ f.estado }}" style="display:inline-block;padding:2px 6px;margin:1px;border-radius:4px;font-size:10px;font-weight:700;background:{{ '#065f46' if f.estado == 'Concluída' else ('#b45309' if f.estado == 'Em produção' else '#1e293b') }};color:#fff;">{{ f.numero_etapa }} {{ f.descricao_etapa[:10] }}</span>
+                {% set an = analise_por_op.get(op.num_op) %}
+                {% for f in an.fases %}
+                <span data-testid="pcp-fase-chip-{{ op.num_op }}-{{ f.numero_etapa }}" title="Etapa {{ f.numero_etapa }} - {{ f.descricao_etapa }}: {{ 'PARADA há ' ~ f.horas_sem ~ 'h' if f.parada else f.estado }}" style="display:inline-block;padding:2px 6px;margin:1px;border-radius:4px;font-size:10px;font-weight:700;background:{{ '#b91c1c' if f.parada else ('#065f46' if f.estado == 'Concluída' else ('#b45309' if f.estado == 'Em produção' else '#1e293b')) }};color:#fff;">{% if f.parada %}🛑 {% endif %}{{ f.numero_etapa }} {{ f.descricao_etapa[:10] }}</span>
                 {% endfor %}
             </td>
             <td>
@@ -1141,6 +1142,9 @@ PCP_TEMPLATE = """
                     <div class="fill" style="width:{{ progresso if progresso >= 0 else 0 }}%; background:{% if progresso >= 100 %}#4CAF50{% elif progresso >= 50 %}#FF9800{% else %}#2196F3{% endif %};"></div>
                 </div>
                 <span style="font-size:10px;color:#78909c;">{{ progresso if progresso >= 0 else 0 }}%</span>
+            </td>
+            <td data-testid="pcp-previsao-{{ op.num_op }}" style="font-size:11px;">
+                {% if an.previsao %}<b style="color:#4fc3f7;">{{ an.previsao.strftime('%d/%m %H:%M') }}</b><br><span style="color:#78909c;font-size:10px;">{{ an.horas_restantes }}h máq.</span>{% else %}<span style="color:#78909c;">—</span>{% endif %}
             </td>
             <td>
                 <a href="/pcp/acompanhar/{{ op.num_op }}" data-testid="pcp-acompanhar-{{ op.num_op }}" class="btn btn-sm btn-primary" style="display:inline-block;width:auto;padding:3px 8px;text-decoration:none;">🎯 Fases</a>
@@ -1879,14 +1883,10 @@ def pcp():
         WHERE o.status_geral != 'Concluída' 
         GROUP BY o.num_op 
         ORDER BY o.data_criacao""")
-    ativos = {(r['num_op'], r['numero_etapa']) for r in (query("SELECT num_op, numero_etapa FROM apontamentos WHERE qtd_boas IS NULL AND status='Ativo'") or [])}
-    fases_por_op = {}
-    for e in query("SELECT * FROM op_etapas_execucao ORDER BY num_op, numero_etapa") or []:
-        estado = 'Concluída' if e['status_execucao'] == 'Concluída' else ('Em produção' if (e['num_op'], e['numero_etapa']) in ativos else 'Pendente')
-        fases_por_op.setdefault(e['num_op'], []).append({'numero_etapa': e['numero_etapa'], 'descricao_etapa': e['descricao_etapa'] or '', 'estado': estado})
+    analise_por_op = {op['num_op']: _analise_op(op) for op in (ops or [])}
     
     return render_template_string(BASE_TEMPLATE, 
-        conteudo=render_template_string(PCP_TEMPLATE, desenhos=desenhos, ops=ops, fases_por_op=fases_por_op),
+        conteudo=render_template_string(PCP_TEMPLATE, desenhos=desenhos, ops=ops, analise_por_op=analise_por_op, limite_parada=LIMITE_FASE_PARADA_H),
         aba='pcp', session=session)
 
 @app.route('/pcp/nova', methods=['POST'])
@@ -3493,6 +3493,55 @@ def manual():
 # ACOMPANHAMENTO DE OP POR FASE (PCP)
 # ============================================
 
+LIMITE_FASE_PARADA_H = 8
+HORAS_PRODUTIVAS_DIA = 16
+
+
+def _parse_dt(valor):
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d'):
+        try:
+            return datetime.strptime(str(valor)[:19], fmt)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _analise_op(op):
+    """Detecta fases paradas e estima a entrega da OP pelo tempo de ciclo do roteiro."""
+    num_op = op['num_op']
+    etapas = query("""SELECT e.*, r.tempo_ciclo_minutos FROM op_etapas_execucao e
+        LEFT JOIN roteiros_padrao r ON r.numero_desenho = ? AND r.numero_etapa = e.numero_etapa
+        WHERE e.num_op = ? ORDER BY e.numero_etapa""", (op['numero_desenho'], num_op)) or []
+    ult = {r['numero_etapa']: r for r in (query("""SELECT numero_etapa,
+        MAX(COALESCE(data_hora_fim, data_hora_inicio)) as ultima,
+        SUM(CASE WHEN qtd_boas IS NULL AND status='Ativo' THEN 1 ELSE 0 END) as ativos
+        FROM apontamentos WHERE num_op = ? GROUP BY numero_etapa""", (num_op,)) or [])}
+    agora = datetime.now()
+    referencia = op['data_criacao']
+    primeira_aberta = True
+    fases, minutos = [], 0
+    for e in etapas:
+        u = ult.get(e['numero_etapa'])
+        concluida = e['status_execucao'] == 'Concluída'
+        ativa = bool(u and u['ativos'])
+        dt = _parse_dt((u['ultima'] if u and u['ultima'] else None) or referencia)
+        horas = round((agora - dt).total_seconds() / 3600, 1) if dt else None
+        candidata = not concluida and not ativa and (bool(u) or primeira_aberta)
+        parada = candidata and horas is not None and horas >= LIMITE_FASE_PARADA_H
+        if not concluida:
+            primeira_aberta = False
+            minutos += (e['saldo_residual'] or 0) * (e['tempo_ciclo_minutos'] or 0)
+        if u and u['ultima']:
+            referencia = u['ultima']
+        fases.append({'numero_etapa': e['numero_etapa'], 'descricao_etapa': e['descricao_etapa'] or '',
+                      'estado': 'Concluída' if concluida else ('Em produção' if ativa else 'Pendente'),
+                      'parada': parada, 'horas_sem': horas})
+    dias = minutos / 60 / HORAS_PRODUTIVAS_DIA
+    previsao = agora + timedelta(days=dias) if minutos > 0 else None
+    return {'fases': fases, 'horas_restantes': round(minutos / 60, 1), 'previsao': previsao,
+            'paradas': sum(1 for f in fases if f['parada'])}
+
+
 ACOMPANHAR_TEMPLATE = FASE_TEMPLATE_BASE + MODAL_CSS + """
 <div class="card">
   <h3>🎯 Acompanhamento da OP {{ op.num_op }}</h3>
@@ -3502,20 +3551,24 @@ ACOMPANHAR_TEMPLATE = FASE_TEMPLATE_BASE + MODAL_CSS + """
     <div class="metric"><div class="v">{{ op.meta_total }}</div><div class="l">Meta (peças)</div></div>
     <div class="metric warn"><div class="v">{{ saldo_total }}</div><div class="l">Saldo nas Fases</div></div>
     <div class="metric"><div class="v" style="font-size:14px;">{{ op.data_criacao }}</div><div class="l">Criada em</div></div>
+    <div class="metric" data-testid="acompanhar-previsao"><div class="v" style="font-size:14px;">{{ analise.previsao.strftime('%d/%m/%Y %H:%M') if analise.previsao else '—' }}</div><div class="l">Previsão de entrega · {{ analise.horas_restantes }}h máq.</div></div>
   </div>
+  <small style="color:#78909c;font-size:10px;">Previsão = saldo de cada fase × tempo de ciclo do roteiro, considerando {{ horas_dia }}h produtivas/dia.</small>
+  {% if analise.paradas %}<div data-testid="acompanhar-alerta-parada" style="margin-top:10px;padding:10px;border-radius:6px;background:#7f1d1d;color:#fecaca;font-size:12px;font-weight:700;">🛑 {{ analise.paradas }} fase(s) sem apontamento há mais de {{ limite_parada }}h</div>{% endif %}
   <a class="btn btn-sm btn-info" href="/pcp" data-testid="acompanhar-voltar-btn" style="display:inline-block;width:auto;text-decoration:none;margin-top:10px;padding:6px 12px;">← Voltar ao PCP</a>
 </div>
 
 <div class="card">
   <h3>🛤️ Fases da OP (Roteiro)</h3>
   {% for e in fases %}
-  <div class="list-row" data-testid="fase-{{ e.numero_etapa }}" style="border-left:4px solid {{ '#10b981' if e.status == 'Concluída' else ('#f59e0b' if e.em_producao else '#334155') }};">
+  <div class="list-row" data-testid="fase-{{ e.numero_etapa }}" style="border-left:4px solid {{ '#ef4444' if e.parada else ('#10b981' if e.status == 'Concluída' else ('#f59e0b' if e.em_producao else '#334155')) }};{{ 'background:#2a0f12;' if e.parada else '' }}">
     <div class="info">
       <b>Etapa {{ e.numero_etapa }} — {{ e.descricao }}</b>
       <small>
         {% if e.status == 'Concluída' %}<span class="badge b-ok">✅ Concluída</span>
         {% elif e.em_producao %}<span class="badge b-pend">🔄 Em produção</span>
         {% else %}<span class="badge b-late">⏳ Pendente</span>{% endif %}
+        {% if e.parada %}<span class="badge b-late" data-testid="fase-parada-{{ e.numero_etapa }}" style="background:#b91c1c;color:#fff;">🛑 PARADA há {{ e.horas_sem }}h</span>{% endif %}
         {% if e.em_producao %}
           &nbsp;· <span class="pulse-dot" style="color:#10b981;">●</span>
           {% for a in e.ativos %}{{ a.nome or a.operador }} ({{ a.codigo_maquina }}){% if not loop.last %}, {% endif %}{% endfor %}
@@ -3580,6 +3633,12 @@ def pcp_acompanhar(num_op):
             'ativos': [a for a in ativos if a['numero_etapa'] == e['numero_etapa']],
         })
 
+    analise = _analise_op(op)
+    info = {f['numero_etapa']: f for f in analise['fases']}
+    for f in fases:
+        f['parada'] = info[f['numero_etapa']]['parada']
+        f['horas_sem'] = info[f['numero_etapa']]['horas_sem']
+
     saldo_total = sum(f['saldo'] for f in fases)
     trabalho = (op['meta_total'] or 0) * len(fases)
     progresso_total = round(max(0, min(100, (trabalho - saldo_total) / trabalho * 100)), 1) if trabalho else 0
@@ -3591,7 +3650,8 @@ def pcp_acompanhar(num_op):
     return render_template_string(BASE_TEMPLATE,
         conteudo=render_template_string(ACOMPANHAR_TEMPLATE,
             op=op, fases=fases, historico=historico,
-            saldo_total=saldo_total, progresso_total=progresso_total),
+            saldo_total=saldo_total, progresso_total=progresso_total, analise=analise,
+            limite_parada=LIMITE_FASE_PARADA_H, horas_dia=HORAS_PRODUTIVAS_DIA),
         aba='pcp', session=session)
 
 
