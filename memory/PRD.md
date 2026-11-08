@@ -41,6 +41,11 @@ Anexos via Emergent Object Storage (`/supervisor/op/<num_op>/anexo`, stream `/an
 - Previsão: soma(saldo da fase × tempo de ciclo do roteiro) ÷ 16h produtivas/dia (`HORAS_PRODUTIVAS_DIA`) → coluna "Previsão" no PCP e card na tela de fases
 
 
+## 2026-11-08 — Controle de acesso por papel
+- Guard global `exigir_supervisor` (before_request): `/pcp*`, `/supervisor*`, `/relatorio*`, `/api/roteiro*` só para papel `supervisor` (lido do banco a cada requisição); operador → GET redireciona p/ `/operador`, POST 403; tentativa registrada na auditoria (`acesso_negado`)
+- Abas PCP/SUP/Fila/Relat./Saúde/Gerenciar/Histórico ocultas para operador; supervisor acessa tudo, inclusive apontamentos
+
+
 ## Backlog
 - UI de vínculo Google em modal (rota pronta)
 - Notificações SSE em vez de poll

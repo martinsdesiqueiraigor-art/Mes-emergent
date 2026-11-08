@@ -106,6 +106,24 @@ def load_session_from_cookie():
     except Exception:
         pass
 
+AREAS_SUPERVISOR = ('/pcp', '/supervisor', '/relatorio', '/api/roteiro')
+
+
+@app.before_request
+def exigir_supervisor():
+    if not request.path.startswith(AREAS_SUPERVISOR) or not session.get('matricula'):
+        return
+    op = query("SELECT papel, ativo FROM operadores WHERE matricula = ?", (session['matricula'],), one=True)
+    papel = (op['papel'] if op else None) or 'operador'
+    session['papel'] = papel
+    if papel == 'supervisor':
+        return
+    log_audit('acesso_negado', 'rota', request.path, f"{session['matricula']} tentou {request.method}")
+    if request.method != 'GET':
+        return ('Acesso restrito ao supervisor', 403)
+    flash('Acesso restrito ao supervisor', 'danger')
+    return redirect(url_for('operador'))
+
 # ============================================
 # FUNÇÕES DE BACKUP
 # ============================================
@@ -784,6 +802,7 @@ BASE_TEMPLATE = """
         
         <div class="nav-tabs">
             <a href="/operador" class="{% if aba == 'operador' %}active{% endif %}">🧑‍🔧 OP</a>
+            {% if session.get('papel') == 'supervisor' %}
             <a href="/pcp" class="{% if aba == 'pcp' %}active{% endif %}">📋 PCP</a>
             <a href="/supervisor" class="{% if aba == 'supervisor' %}active{% endif %}">👮 SUP</a>
             <a href="/supervisor/fila" class="{% if aba == 'fila' %}active{% endif %}" data-testid="nav-fila">✅ Fila <span id="badge-fila" data-testid="badge-fila" style="display:none;background:#ef4444;color:#fff;border-radius:999px;padding:1px 7px;font-size:10px;font-weight:bold;animation:softPulse 1.2s ease-in-out infinite;"></span></a>
@@ -791,6 +810,7 @@ BASE_TEMPLATE = """
             <a href="/supervisor/saude" class="{% if aba == 'saude' %}active{% endif %}">❤️ Saúde</a>
             <a href="/supervisor/gerenciar" class="{% if aba == 'ger' %}active{% endif %}">⚙️ Gerenciar</a>
             <a href="/supervisor/historico" class="{% if aba == 'hist' %}active{% endif %}">📚 Histórico</a>
+            {% endif %}
             <a href="/manual" class="{% if aba == 'manual' %}active{% endif %}">📖 Manual</a>
         </div>
         <style>@keyframes softPulse{0%,100%{opacity:1}50%{opacity:.45}}</style>
