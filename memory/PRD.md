@@ -45,6 +45,11 @@ Anexos via Emergent Object Storage (`/supervisor/op/<num_op>/anexo`, stream `/an
 - Guard global `exigir_supervisor` (before_request): `/pcp*`, `/supervisor*`, `/relatorio*`, `/api/roteiro*` só para papel `supervisor` (lido do banco a cada requisição); operador → GET redireciona p/ `/operador`, POST 403; tentativa registrada na auditoria (`acesso_negado`)
 - Abas PCP/SUP/Fila/Relat./Saúde/Gerenciar/Histórico ocultas para operador; supervisor acessa tudo, inclusive apontamentos
 
+## 2026-11-08 — Papel PCP + painel do operador
+- Novo papel `pcp` (selecionável no modal de edição do operador): acessa só `/pcp*` e Manual; login/Google redirecionam para `/pcp`; sem aba OP nem abas de supervisor
+- Tela do operador: cards "Peças boas hoje" e "Refugo hoje · % qualidade" calculados só com os apontamentos do próprio operador (substitui OEE fixo 85%)
+
+
 
 ## Backlog
 - UI de vínculo Google em modal (rota pronta)

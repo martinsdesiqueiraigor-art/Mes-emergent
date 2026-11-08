@@ -116,7 +116,7 @@ def exigir_supervisor():
     op = query("SELECT papel, ativo FROM operadores WHERE matricula = ?", (session['matricula'],), one=True)
     papel = (op['papel'] if op else None) or 'operador'
     session['papel'] = papel
-    if papel == 'supervisor':
+    if papel == 'supervisor' or (papel == 'pcp' and request.path.startswith('/pcp')):
         return
     log_audit('acesso_negado', 'rota', request.path, f"{session['matricula']} tentou {request.method}")
     if request.method != 'GET':
@@ -801,9 +801,9 @@ BASE_TEMPLATE = """
         </div>
         
         <div class="nav-tabs">
-            <a href="/operador" class="{% if aba == 'operador' %}active{% endif %}">🧑‍🔧 OP</a>
+            {% if session.get('papel') != 'pcp' %}<a href="/operador" class="{% if aba == 'operador' %}active{% endif %}">🧑‍🔧 OP</a>{% endif %}
+            {% if session.get('papel') in ('supervisor', 'pcp') %}<a href="/pcp" class="{% if aba == 'pcp' %}active{% endif %}" data-testid="nav-pcp">📋 PCP</a>{% endif %}
             {% if session.get('papel') == 'supervisor' %}
-            <a href="/pcp" class="{% if aba == 'pcp' %}active{% endif %}">📋 PCP</a>
             <a href="/supervisor" class="{% if aba == 'supervisor' %}active{% endif %}">👮 SUP</a>
             <a href="/supervisor/fila" class="{% if aba == 'fila' %}active{% endif %}" data-testid="nav-fila">✅ Fila <span id="badge-fila" data-testid="badge-fila" style="display:none;background:#ef4444;color:#fff;border-radius:999px;padding:1px 7px;font-size:10px;font-weight:bold;animation:softPulse 1.2s ease-in-out infinite;"></span></a>
             <a href="/supervisor/relatorios" class="{% if aba == 'rel' %}active{% endif %}">📊 Relat.</a>
@@ -932,13 +932,13 @@ OPERADOR_TEMPLATE = """
             <div class="value">{{ ativas|length }}</div>
             <div class="label">🔄 Ativas</div>
         </div>
-        <div class="metric-card">
-            <div class="value" style="color:#81c784;">{{ historico|length }}</div>
-            <div class="label">✅ Hoje</div>
+        <div class="metric-card" data-testid="meu-boas-hoje">
+            <div class="value" style="color:#81c784;">{{ meu.boas }}</div>
+            <div class="label">✅ Peças boas hoje</div>
         </div>
-        <div class="metric-card">
-            <div class="value" style="color:#ffcc80;">85%</div>
-            <div class="label">📈 OEE</div>
+        <div class="metric-card" data-testid="meu-refugo-hoje">
+            <div class="value" style="color:{{ '#ef9a9a' if meu.refugo else '#ffcc80' }};">{{ meu.refugo }}</div>
+            <div class="label">♻️ Refugo hoje · {{ meu.qualidade }}% qualidade</div>
         </div>
     </div>
     
@@ -1738,8 +1738,15 @@ def home():
 def operador():
     if not session.get('matricula'):
         return redirect(url_for('login'))
+    if session.get('papel') == 'pcp':
+        return redirect(url_for('pcp'))
     
     matricula = session['matricula']
+    r = query("""SELECT COALESCE(SUM(qtd_boas),0) as boas, COALESCE(SUM(refugo),0) as refugo FROM apontamentos
+        WHERE operador = ? AND DATE(data_hora_inicio) = DATE('now') AND qtd_boas IS NOT NULL""", (matricula,), one=True)
+    total = (r['boas'] or 0) + (r['refugo'] or 0)
+    meu = {'boas': r['boas'] or 0, 'refugo': r['refugo'] or 0,
+           'qualidade': round((r['boas'] or 0) / total * 100, 1) if total else 100}
     
     ativas = query("""SELECT * FROM apontamentos 
         WHERE operador = ? AND qtd_boas IS NULL AND status = 'Ativo' 
@@ -1768,7 +1775,7 @@ def operador():
         conteudo=render_template_string(OPERADOR_TEMPLATE,
             ativas=ativas, historico=historico, ops_disponiveis=ops_disponiveis,
             maquinas_disponiveis=maquinas_disponiveis, paradas_ativas=paradas_ativas,
-            anexos=anexos,
+            anexos=anexos, meu=meu,
             session=session, login=LOGIN_TEMPLATE),
         aba='operador', session=session)
 
@@ -2949,7 +2956,7 @@ GERENCIAR_TEMPLATE = FASE_TEMPLATE_BASE + MODAL_CSS + """
     <div class="form-group"><label>Turno</label>
       <select name="turno"><option>Turno A</option><option>Turno B</option><option>Turno C</option></select></div>
     <div class="form-group"><label>Papel</label>
-      <select name="papel"><option value="operador">operador</option><option value="supervisor">supervisor</option></select></div>
+      <select name="papel"><option value="operador">operador</option><option value="pcp">pcp</option><option value="supervisor">supervisor</option></select></div>
     <button class="btn btn-sm btn-success" data-testid="btn-save-edit-op">Salvar</button>
   </form>
 </div></div>
@@ -3386,7 +3393,7 @@ def auth_google_session():
           (email, matricula, session_token, expires), commit=True)
     log_audit('google_login', 'auth', email, f'matricula={matricula}')
 
-    resp = jsonify({'ok': True, 'redirect': '/operador' if (op['papel'] or 'operador') != 'supervisor' else '/supervisor',
+    resp = jsonify({'ok': True, 'redirect': {'supervisor': '/supervisor', 'pcp': '/pcp'}.get(op['papel'] or 'operador', '/operador'),
                     'user': {'matricula': matricula, 'nome': op['nome'], 'papel': op['papel'] or 'operador'}})
     resp.set_cookie('session_token', session_token, max_age=7*24*3600,
                     httponly=True, secure=True, samesite='None', path='/')
