@@ -106,7 +106,7 @@ def load_session_from_cookie():
     except Exception:
         pass
 
-AREAS_SUPERVISOR = ('/pcp', '/supervisor', '/relatorio', '/api/roteiro')
+AREAS_SUPERVISOR = ('/pcp', '/supervisor', '/relatorio')
 
 
 @app.before_request
@@ -594,6 +594,7 @@ BASE_TEMPLATE = """
         .btn-primary { background: #1a3a4a; color: #fff; }
         .btn-warning { background: #e65100; color: #fff; }
         .btn-info { background: #01579b; color: #fff; }
+        .btn-secondary { background: #1e3a5f; color: #e3f2fd; text-decoration: none; display: inline-block; border: 1px solid #2c5282; }
         .btn-sm { padding: 6px 12px; font-size: 12px; width: auto; }
         .btn-xs { padding: 3px 8px; font-size: 10px; width: auto; }
         
@@ -769,6 +770,7 @@ BASE_TEMPLATE = """
         </div>
         {% endif %}
         
+        {% if session.get('papel') == 'supervisor' %}
         <!-- Menu Burger -->
         <div class="burger-menu" id="burgerMenu">
             <div class="burger-content">
@@ -799,6 +801,7 @@ BASE_TEMPLATE = """
                 <a href="/logout" style="color:#ef9a9a;">🚪 Sair</a>
             </div>
         </div>
+        {% endif %}
         
         <div class="nav-tabs">
             {% if session.get('papel') != 'pcp' %}<a href="/operador" class="{% if aba == 'operador' %}active{% endif %}">🧑‍🔧 OP</a>{% endif %}
@@ -834,7 +837,7 @@ BASE_TEMPLATE = """
         // Fechar menu ao clicar fora
         document.addEventListener('click', function(e) {
             const menu = document.getElementById('burgerMenu');
-            if (menu.classList.contains('active') && !e.target.closest('.burger-content') && !e.target.closest('.burger-toggle')) {
+            if (menu && menu.classList.contains('active') && !e.target.closest('.burger-content') && !e.target.closest('.burger-toggle')) {
                 menu.classList.remove('active');
             }
         });
@@ -903,7 +906,7 @@ LOGIN_TEMPLATE = """
     <form method="POST">
         <div class="form-group">
             <label>Matrícula</label>
-            <input type="number" name="matricula" placeholder="Ex: 1024" required>
+            <input type="text" inputmode="numeric" name="matricula" placeholder="Ex: 1024" required>
         </div>
         <div class="form-group">
             <label>Senha</label>
@@ -917,9 +920,6 @@ LOGIN_TEMPLATE = """
             onclick="window.location.href='https://auth.emergentagent.com/?redirect='+encodeURIComponent(window.location.origin+'/auth/google/landing')">
         🔵 Entrar com Google
     </button>
-    <div style="margin-top:15px; font-size:11px; color:#455a64; text-align:center;">
-        Teste: 1024, 1025, 1026<br>Senha: 123456
-    </div>
 </div>
 """
 
@@ -1143,6 +1143,7 @@ PCP_TEMPLATE = """
 <div class="card">
     <h3>📊 OPs em Andamento</h3>
     {% if ops %}
+    <div style="overflow-x:auto;">
     <table class="table">
         <thead><tr><th>OP</th><th>Meta</th><th>Fases</th><th>Progresso</th><th>Previsão</th><th>Ações</th></tr></thead>
         <tbody>
@@ -1157,11 +1158,12 @@ PCP_TEMPLATE = """
                 {% endfor %}
             </td>
             <td>
-                {% set progresso = ((op.meta_total - op.saldo_total) / op.meta_total * 100)|round(0) if op.meta_total > 0 else 0 %}
+                {% set nf = an.fases|length %}
+                {% set progresso = ((op.meta_total * nf - op.saldo_total) / (op.meta_total * nf) * 100)|round(1) if op.meta_total > 0 and nf > 0 else 0 %}
                 <div class="progress-bar">
                     <div class="fill" style="width:{{ progresso if progresso >= 0 else 0 }}%; background:{% if progresso >= 100 %}#4CAF50{% elif progresso >= 50 %}#FF9800{% else %}#2196F3{% endif %};"></div>
                 </div>
-                <span style="font-size:10px;color:#78909c;">{{ progresso if progresso >= 0 else 0 }}%</span>
+                <span style="font-size:10px;color:#78909c;" data-testid="pcp-progresso-{{ op.num_op }}">{{ progresso if progresso >= 0 else 0 }}%</span>
             </td>
             <td data-testid="pcp-previsao-{{ op.num_op }}" style="font-size:11px;">
                 {% if an.previsao %}<b style="color:#4fc3f7;">{{ an.previsao.strftime('%d/%m %H:%M') }}</b><br><span style="color:#78909c;font-size:10px;">{{ an.horas_restantes }}h máq.</span>{% else %}<span style="color:#78909c;">—</span>{% endif %}
@@ -1174,6 +1176,7 @@ PCP_TEMPLATE = """
         {% endfor %}
         </tbody>
     </table>
+    </div>
     {% else %}
     <p class="text-muted">Nenhuma OP em andamento</p>
     {% endif %}
@@ -1458,7 +1461,7 @@ ROTEIRO_GESTAO_TEMPLATE = """
 <script>
 function editarRoteiro(id) {
     // Buscar dados via fetch
-    fetch('/api/roteiro/' + id)
+    fetch('/supervisor/api/roteiro/' + id)
         .then(response => response.json())
         .then(data => {
             document.getElementById('edit_id').value = data.id;
@@ -2179,7 +2182,7 @@ def supervisor_roteiro_excluir(id):
     flash('🗑️ Etapa excluída', 'info')
     return redirect(url_for('supervisor_roteiro_gerenciar'))
 
-@app.route('/api/roteiro/<int:id>')
+@app.route('/supervisor/api/roteiro/<int:id>')
 def api_roteiro(id):
     if not session.get('matricula'):
         return jsonify({'erro': 'Não logado'}), 401
@@ -3465,6 +3468,8 @@ def ver_anexo(num_op):
 
 @app.route('/pendencias/count')
 def pendencias_count():
+    if not session.get('matricula'):
+        return jsonify({'count': 0}), 401
     r = query("SELECT COUNT(*) as c FROM apontamentos WHERE status_aprovacao = 'pendente' OR auto_fechado = 1", one=True)
     return jsonify({'count': r['c'] if r else 0})
 

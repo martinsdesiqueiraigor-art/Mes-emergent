@@ -1,0 +1,44 @@
+{
+  "summary": "Tested RBAC (operador/supervisor/pcp), /pcp phase chips + previsão, /pcp/acompanhar, operador own-counter cards, relatórios/exports and mobile layout. Pytest: 53/53 passed (operador checks run with 1025, see context). Playwright covered desktop supervisor flow and 390px mobile for PCP user, acompanhar and operador. Core features work. Issues found: (1) the login matrícula input is type=number, so the alphanumeric accounts TEST_SUP/TEST_PCP cannot be typed in a real browser; (2) the PCP table Progresso column uses the old formula and shows 0% while acompanhar shows 50% for OP-002; (3) /api/roteiro/<id> is captured by the k8s ingress (goes to FastAPI and returns 404), so the roteiro edit fetch is broken in preview; (4) minor design issues.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/api/roteiro/<id>", "issue": "Through the preview URL, all /api/* goes to port 8001 (FastAPI) and returns {\"detail\":\"Not Found\"} 404. It works on localhost:3000. The JS fetch('/api/roteiro/'+id) at mes_aps.py:1461 (roteiro edit) is therefore broken in preview. RBAC for this path could not be verified externally. Suggest renaming it to something like /supervisor/api/roteiro/<id>."},
+      {"endpoint": "/pendencias/count", "issue": "No login check (anonymous users can read the pending count). Low risk."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "LOGIN_TEMPLATE matrícula input", "issue": "<input type=number name=matricula> rejects letters, so TEST_SUP and TEST_PCP (and any alphanumeric matrícula) cannot log in through the UI. Playwright fill fails with 'Cannot type text into input[type=number]'. Change to type=text inputmode=numeric.", "selector": "input[name='matricula']", "priority": "HIGH"},
+      {"component": "PCP_TEMPLATE Progresso column", "issue": "Formula is (meta - SUM(saldos))/meta. For multi-phase OPs it is 0% (OP-002 shows 0.0% while /pcp/acompanhar shows 50.0%). Use the same formula as acompanhar: (meta*nfases - soma saldos)/(meta*nfases). The column also lacks a data-testid.", "selector": "/pcp table td Progresso", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/pcp mobile 390px", "issues": ["OPs em Andamento table is wider than the card: the Ações column ('🎯 Fases' button) is clipped at the right edge. Wrap the table in an overflow-x:auto container."]},
+      {"screen": "/supervisor/relatorios", "issues": ["Export links (OEE XLSX/PDF, Pareto, Aging, Prod.) are dark-blue underlined text on a dark background, very low contrast"]},
+      {"screen": "/login", "issues": ["Shows the test credentials hint 'Teste: 1024, 1025, 1026 Senha: 123456' publicly"]},
+      {"screen": "BASE_TEMPLATE burger menu", "issues": ["The hidden burger menu with 11 /supervisor links is rendered in the DOM for operador/pcp users. It is not visible and the routes are protected, but it is better to render it only for supervisors."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_rbac_pcp.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Change login matrícula input from type=number to type=text (inputmode=numeric) so TEST_SUP/TEST_PCP and alphanumeric matrículas can log in",
+    "Fix PCP table Progresso formula to match acompanhar (meta*nfases) and add a data-testid",
+    "Move /api/roteiro/<id> to a non-/api path (preview ingress sends /api to FastAPI on 8001) and update the fetch at line ~1461 and AREAS_SUPERVISOR",
+    "Wrap the /pcp OPs table in an overflow-x:auto container for mobile",
+    "Improve contrast of the export links on /supervisor/relatorios"
+  ],
+  "critical_code_review_comments": [
+    "exigir_supervisor returns early when there is no session and relies on each route's inline login check. All checked routes have one, but a decorator would be safer.",
+    "The role check startswith('/pcp') would also match any future route like '/pcpxyz'. Prefer path == '/pcp' or startswith('/pcp/').",
+    "mes_aps.py is 3700+ lines with inline templates. It should be split into modules.",
+    "operador(): DATE('now') in SQLite is UTC while data_hora_inicio uses local datetime.now(). This is fine on a UTC pod but would drift in other timezones."
+  ],
+  "updated_files": ["/app/backend/tests/test_rbac_pcp.py"],
+  "success_rate": {"backend": "100% (53/53 pytest)", "frontend": "~85% (only works when the input type is changed via JS, plus the progress mismatch)"},
+  "test_credentials": "1024 is NO LONGER an operador: the real owner (1000, via Google) changed 1024's papel operador→pcp at 2026-11-08 15:09:44 (audit_log id 117) during testing. I did not revert it because it is the user's data. Operador tests used 1025/123456. /app/memory/test_credentials.md does not list TEST_SUP/TEST_PCP; add them.",
+  "seed_data_creation": "None. No OPs, apontamentos or users were created or modified. The denied POSTs (/pcp/nova, /supervisor/operador/reset/1026) were rejected before reaching the handler.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Flask app on port 3000 behind the preview URL. /api/* does not reach Flask. Run tests/test_rbac_pcp.py (xdist is configured in pytest.ini). In Playwright, the login input needs JS type='text' to enter TEST_ users until it is fixed. The pod clock is Nov 2026, so many phases show as parada. Use 1025 as the operador."
+}
