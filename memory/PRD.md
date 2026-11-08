@@ -49,6 +49,10 @@ Anexos via Emergent Object Storage (`/supervisor/op/<num_op>/anexo`, stream `/an
 - Novo papel `pcp` (selecionável no modal de edição do operador): acessa só `/pcp*` e Manual; login/Google redirecionam para `/pcp`; sem aba OP nem abas de supervisor
 - Tela do operador: cards "Peças boas hoje" e "Refugo hoje · % qualidade" calculados só com os apontamentos do próprio operador (substitui OEE fixo 85%)
 
+## 2026-11-08 — Verificação completa (iterações 1 e 2: 75/75 backend, frontend 100%)
+- Correções: campo matrícula aceita letras; dica de senhas removida do login; progresso multifase unificado (PCP, impressão, consulta); tabela PCP rolável no celular; rota roteiro movida p/ `/supervisor/api/roteiro/<id>`; `/pendencias/count` exige login; botões de exportação visíveis; menu burger só p/ supervisor
+
+
 
 
 ## Backlog

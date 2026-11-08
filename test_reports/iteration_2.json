@@ -1,0 +1,26 @@
+{
+  "summary": "Iteration 2 retest of the 8 fixes from iteration 1, plus light RBAC, acompanhar and export regression. Pytest: 75/75 passed (53 regression tests plus 22 new ones in test_iter2_fixes.py). Playwright: desktop login through the UI worked for TEST_SUP, TEST_PCP and 1025. The roteiro edit modal on /supervisor/roteiro/gerenciar opens with the data filled in through the preview URL (Corte/SR-01/1.5, action /supervisor/roteiro/editar/1). The export buttons are now light text on dark blue. No JS pageerrors when operador or pcp click the page. On mobile 390px, the /pcp table is in an overflow-x:auto wrapper (table 375px inside a 338px container, document width 390), and the Fases button opens /pcp/acompanhar/OP-002 showing 50.0%, the stopped-phase alert and the previsão. All 8 fixes are verified.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "/pcp/imprimir/<op> (mes_aps.py ~1982) and /supervisor/consulta/<op> (~2239)", "issue": "Both still use the old progresso formula (meta - SUM(saldos))/meta. Multi-phase OPs show 0% here, which does not match /pcp (50.0% for OP-002). Use the meta*nfases formula."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/supervisor/relatorios", "issues": ["The CSV button is still underlined while the other export buttons are not (cosmetic)", "The date filters use the browser's native date picker (acceptable in this legacy Flask app)"]},
+      {"screen": "BASE_TEMPLATE", "issues": ["The burger toggle only shows when aba=='supervisor', so a supervisor on /supervisor/relatorios has no ☰ button. It is minor because the nav tabs cover the same pages."]}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_rbac_pcp.py", "/app/backend/tests/test_iter2_fixes.py", "/app/test_reports/pytest/pytest_results_iter2.xml"],
+  "action_items": ["Optional: apply the multi-phase progresso formula in pcp_imprimir and the supervisor consulta OP detail"],
+  "critical_code_review_comments": ["api_roteiro only checks for a login itself; RBAC comes from the /supervisor before_request, and pcp/operador get a 302 as verified. This is fine."],
+  "updated_files": ["/app/backend/tests/test_iter2_fixes.py"],
+  "success_rate": {"backend": "100% (75/75)", "frontend": "100%"},
+  "seed_data_creation": "None. Read-only tests; no data or roles were changed.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Run pytest from /app/backend/tests (test_iter2_fixes imports helpers from test_rbac_pcp). Supervisor login lands on /operador. The pod clock is ahead, so OPs showing as PARADA is expected."
+}

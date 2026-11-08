@@ -1981,9 +1981,10 @@ def pcp_imprimir(num_op):
     
     # Calcular progresso
     meta = op['meta_total']
-    saldo_total = query("SELECT SUM(saldo_residual) as total FROM op_etapas_execucao WHERE num_op = ?", (num_op,), one=True)
+    saldo_total = query("SELECT SUM(saldo_residual) as total, COUNT(*) as nf FROM op_etapas_execucao WHERE num_op = ?", (num_op,), one=True)
     saldo = saldo_total['total'] if saldo_total and saldo_total['total'] else 0
-    progresso = round(((meta - saldo) / meta * 100), 1) if meta > 0 else 0
+    trabalho = meta * (saldo_total['nf'] or 1) if saldo_total else meta
+    progresso = round(((trabalho - saldo) / trabalho * 100), 1) if trabalho > 0 else 0
     progresso = max(0, progresso)
     
     # Calcular tempo total
@@ -2238,9 +2239,10 @@ def supervisor_consulta_buscar():
     
     # Calcular progresso
     meta = op_detalhes['meta_total']
-    saldo_total = query("SELECT SUM(saldo_residual) as total FROM op_etapas_execucao WHERE num_op = ?", (num_op,), one=True)
+    saldo_total = query("SELECT SUM(saldo_residual) as total, COUNT(*) as nf FROM op_etapas_execucao WHERE num_op = ?", (num_op,), one=True)
     saldo = saldo_total['total'] if saldo_total and saldo_total['total'] else 0
-    progresso = round(((meta - saldo) / meta * 100), 1) if meta > 0 else 0
+    trabalho = meta * (saldo_total['nf'] or 1) if saldo_total else meta
+    progresso = round(((trabalho - saldo) / trabalho * 100), 1) if trabalho > 0 else 0
     progresso = max(0, progresso)
     
     ops = query("SELECT num_op FROM ordens_producao ORDER BY data_criacao DESC")
