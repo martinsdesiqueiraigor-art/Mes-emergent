@@ -267,10 +267,13 @@ def _ensure_upgrades():
             except sqlite3.OperationalError:
                 pass
             # comentario em paradas
-            try:
-                conn.execute("ALTER TABLE paradas_maquina ADD COLUMN comentario TEXT")
-            except sqlite3.OperationalError:
-                pass
+            for tbl, col in [("paradas_maquina", "comentario TEXT"),
+                             ("paradas_maquina", "codigo_maquina TEXT"),
+                             ("ordens_producao", "data_prometida TEXT")]:
+                try:
+                    conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col}")
+                except sqlite3.OperationalError:
+                    pass
             conn.commit()
     except Exception as e:
         print(f"[upgrade] {e}")
@@ -805,7 +808,8 @@ BASE_TEMPLATE = """
         
         <div class="nav-tabs">
             {% if session.get('papel') != 'pcp' %}<a href="/operador" class="{% if aba == 'operador' %}active{% endif %}">🧑‍🔧 OP</a>{% endif %}
-            {% if session.get('papel') in ('supervisor', 'pcp') %}<a href="/pcp" class="{% if aba == 'pcp' %}active{% endif %}" data-testid="nav-pcp">📋 PCP</a>{% endif %}
+            {% if session.get('papel') in ('supervisor', 'pcp') %}<a href="/pcp" class="{% if aba == 'pcp' %}active{% endif %}" data-testid="nav-pcp">📋 PCP</a>
+            <a href="/pcp/tv" target="_blank" data-testid="nav-tv">📺 TV</a>{% endif %}
             {% if session.get('papel') == 'supervisor' %}
             <a href="/supervisor" class="{% if aba == 'supervisor' %}active{% endif %}">👮 SUP</a>
             <a href="/supervisor/fila" class="{% if aba == 'fila' %}active{% endif %}" data-testid="nav-fila">✅ Fila <span id="badge-fila" data-testid="badge-fila" style="display:none;background:#ef4444;color:#fff;border-radius:999px;padding:1px 7px;font-size:10px;font-weight:bold;animation:softPulse 1.2s ease-in-out infinite;"></span></a>
@@ -816,6 +820,7 @@ BASE_TEMPLATE = """
             {% endif %}
             <a href="/manual" class="{% if aba == 'manual' %}active{% endif %}">📖 Manual</a>
         </div>
+        <div id="andon-banner" data-testid="andon-banner" style="display:none;background:#b91c1c;color:#fff;border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;animation:softPulse 1.6s ease-in-out infinite;"></div>
         <style>@keyframes softPulse{0%,100%{opacity:1}50%{opacity:.45}}</style>
         
         {% with messages = get_flashed_messages(with_categories=true) %}
@@ -874,6 +879,19 @@ BASE_TEMPLATE = """
                 o.start(); o.stop(ctx.currentTime + 0.6);
             }catch(e){}
         }
+        var lastAndon = null;
+        function renderAndon(lista){
+            var el = document.getElementById('andon-banner');
+            if(!el) return;
+            if(!lista || !lista.length){ el.style.display='none'; el.innerHTML=''; return; }
+            el.innerHTML = '<b>🚨 ANDON — ' + lista.length + ' máquina(s) parada(s)</b>' + lista.map(function(p){
+                return '<div data-testid="andon-item-' + p.id + '" style="margin-top:4px;">🏭 <b>' + (p.maquina || 'Máquina não informada') + '</b> · ' + p.motivo + ' · ' + p.operador + ' · <b>' + p.minutos + ' min</b></div>';
+            }).join('');
+            el.style.display = 'block';
+            var ids = lista.map(function(p){return p.id;});
+            if(lastAndon !== null && ids.some(function(i){return lastAndon.indexOf(i) < 0;})){ beepPendencia(); setTimeout(beepPendencia, 700); }
+            lastAndon = ids;
+        }
         function updateBadgeFila(){
             fetch('/pendencias/count').then(function(r){return r.json()})
             .then(function(j){
@@ -882,12 +900,12 @@ BASE_TEMPLATE = """
                     if(j.count>0){b.textContent=j.count;b.style.display='inline-block';}
                     else{b.style.display='none';}
                 }
-                // Toca apenas quando surge pendência NOVA e o usuário é supervisor
                 if(isSup && lastPend !== null && j.count > lastPend){ beepPendencia(); }
                 lastPend = j.count;
+                if(isSup){ renderAndon(j.andon); }
             }).catch(function(){});
         }
-        setInterval(updateBadgeFila, 30000);
+        setInterval(updateBadgeFila, 15000);
         updateBadgeFila();
     </script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -1082,8 +1100,16 @@ OPERADOR_TEMPLATE = """
         <h3>🚨 Registrar Parada</h3>
         <form method="POST" action="/operador/parada">
             <div class="form-group">
+                <label>Máquina</label>
+                <select name="codigo_maquina" required data-testid="parada-maquina">
+                    {% for m in maquinas_disponiveis %}
+                    <option value="{{ m.codigo_maquina }}" {% if m.codigo_maquina == maquina_atual %}selected{% endif %}>{{ m.codigo_maquina }} - {{ m.descricao }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-group">
                 <label>Motivo</label>
-                <select name="motivo" required>
+                <select name="motivo" required data-testid="parada-motivo">
                     <option>Falta de Matéria-Prima</option>
                     <option>Quebra de Componente</option>
                     <option>Setup</option>
@@ -1091,15 +1117,16 @@ OPERADOR_TEMPLATE = """
                     <option>Outro</option>
                 </select>
             </div>
-            <button type="submit" class="btn btn-danger">🔴 Disparar Parada</button>
+            <button type="submit" class="btn btn-danger" data-testid="btn-disparar-parada">🔴 Disparar Parada (Andon)</button>
         </form>
         {% if paradas_ativas %}
         <h4 style="margin-top:10px; color:#ff9800;">🔧 Paradas Ativas</h4>
         <table class="table">
-            <thead><tr><th>Motivo</th><th>Início</th><th>Ação</th></tr></thead>
+            <thead><tr><th>Máquina</th><th>Motivo</th><th>Início</th><th>Ação</th></tr></thead>
             <tbody>
             {% for p in paradas_ativas %}
             <tr>
+                <td>{{ p.codigo_maquina or '-' }}</td>
                 <td>{{ p.motivo }}</td>
                 <td>{{ p.data_hora_inicio[11:16] if p.data_hora_inicio else '--:--' }}</td>
                 <td>
@@ -1136,6 +1163,10 @@ PCP_TEMPLATE = """
             <label>Meta Total</label>
             <input type="number" name="meta_total" required min="1">
         </div>
+        <div class="form-group">
+            <label>Data prometida ao cliente (opcional)</label>
+            <input type="date" name="data_prometida" data-testid="pcp-nova-data-prometida">
+        </div>
         <button type="submit" class="btn btn-primary">⚡ CRIAR OP</button>
     </form>
 </div>
@@ -1166,7 +1197,8 @@ PCP_TEMPLATE = """
                 <span style="font-size:10px;color:#78909c;" data-testid="pcp-progresso-{{ op.num_op }}">{{ progresso if progresso >= 0 else 0 }}%</span>
             </td>
             <td data-testid="pcp-previsao-{{ op.num_op }}" style="font-size:11px;">
-                {% if an.previsao %}<b style="color:#4fc3f7;">{{ an.previsao.strftime('%d/%m %H:%M') }}</b><br><span style="color:#78909c;font-size:10px;">{{ an.horas_restantes }}h máq.</span>{% else %}<span style="color:#78909c;">—</span>{% endif %}
+                {% if an.previsao %}<b style="color:{{ '#ef4444' if an.atrasada else '#4fc3f7' }};">{{ an.previsao.strftime('%d/%m %H:%M') }}</b><br><span style="color:#78909c;font-size:10px;">{{ an.horas_restantes }}h máq.</span>{% else %}<span style="color:#78909c;">—</span>{% endif %}
+                {% if an.data_prometida %}<br><span data-testid="pcp-prometida-{{ op.num_op }}" style="font-size:10px;{{ 'color:#fff;background:#b91c1c;padding:1px 4px;border-radius:3px;font-weight:700;' if an.atrasada else 'color:#a7f3d0;' }}">{{ '⚠ ATRASO · ' if an.atrasada else '' }}prom. {{ an.data_prometida.strftime('%d/%m') }}</span>{% endif %}
             </td>
             <td>
                 <a href="/pcp/acompanhar/{{ op.num_op }}" data-testid="pcp-acompanhar-{{ op.num_op }}" class="btn btn-sm btn-primary" style="display:inline-block;width:auto;padding:3px 8px;text-decoration:none;">🎯 Fases</a>
@@ -1180,6 +1212,17 @@ PCP_TEMPLATE = """
     {% else %}
     <p class="text-muted">Nenhuma OP em andamento</p>
     {% endif %}
+</div>
+
+<div class="card" data-testid="pcp-carga-maquinas">
+    <h3>🏭 Carga por Máquina (próximos {{ dias_semana }} dias úteis)</h3>
+    <p style="font-size:11px;color:#78909c;margin-bottom:8px;">Horas programadas (saldo das fases abertas × tempo de ciclo) ÷ capacidade de {{ capacidade }}h ({{ horas_dia }}h/dia).</p>
+    {% for c in carga %}
+    <div data-testid="carga-{{ c.maquina }}" style="margin-bottom:8px;">
+        <div style="display:flex;justify-content:space-between;font-size:12px;"><span><b>{{ c.maquina }}</b> {{ c.descricao }}</span><span style="color:{{ '#ef4444' if c.pct > 100 else ('#f59e0b' if c.pct > 80 else '#10b981') }};font-weight:700;">{{ c.horas }}h · {{ c.pct }}%{% if c.pct > 100 %} ⚠ GARGALO{% endif %}</span></div>
+        <div class="progress-bar"><div class="fill" style="width:{{ [c.pct, 100]|min }}%;background:{{ '#ef4444' if c.pct > 100 else ('#f59e0b' if c.pct > 80 else '#10b981') }};"></div></div>
+    </div>
+    {% else %}<p class="text-muted">Sem carga programada</p>{% endfor %}
 </div>
 """
 
@@ -1778,7 +1821,7 @@ def operador():
         conteudo=render_template_string(OPERADOR_TEMPLATE,
             ativas=ativas, historico=historico, ops_disponiveis=ops_disponiveis,
             maquinas_disponiveis=maquinas_disponiveis, paradas_ativas=paradas_ativas,
-            anexos=anexos, meu=meu,
+            anexos=anexos, meu=meu, maquina_atual=(ativas[0]['codigo_maquina'] if ativas else None),
             session=session, login=LOGIN_TEMPLATE),
         aba='operador', session=session)
 
@@ -1881,9 +1924,10 @@ def operador_parada():
         return redirect(url_for('login'))
     
     motivo = request.form.get('motivo')
-    query("INSERT INTO paradas_maquina (operador, motivo, status) VALUES (?, ?, 'Ativa')", 
-          (session['matricula'], motivo), commit=True)
-    flash('🔴 Parada registrada', 'warning')
+    codigo_maquina = request.form.get('codigo_maquina') or None
+    query("INSERT INTO paradas_maquina (operador, motivo, status, codigo_maquina) VALUES (?, ?, 'Ativa', ?)", 
+          (session['matricula'], motivo, codigo_maquina), commit=True)
+    flash('🔴 Parada registrada — supervisor alertado (Andon)', 'warning')
     return redirect(url_for('operador'))
 
 @app.route('/operador/retomar_parada/<int:id>', methods=['POST'])
@@ -1916,7 +1960,9 @@ def pcp():
     analise_por_op = {op['num_op']: _analise_op(op) for op in (ops or [])}
     
     return render_template_string(BASE_TEMPLATE, 
-        conteudo=render_template_string(PCP_TEMPLATE, desenhos=desenhos, ops=ops, analise_por_op=analise_por_op, limite_parada=LIMITE_FASE_PARADA_H),
+        conteudo=render_template_string(PCP_TEMPLATE, desenhos=desenhos, ops=ops, analise_por_op=analise_por_op,
+            limite_parada=LIMITE_FASE_PARADA_H, carga=_carga_maquinas(), dias_semana=DIAS_UTEIS_SEMANA,
+            horas_dia=HORAS_PRODUTIVAS_DIA, capacidade=HORAS_PRODUTIVAS_DIA * DIAS_UTEIS_SEMANA),
         aba='pcp', session=session)
 
 @app.route('/pcp/nova', methods=['POST'])
@@ -1928,6 +1974,7 @@ def pcp_nova():
     num_op = request.form.get('num_op')
     numero_desenho = request.form.get('numero_desenho')
     meta_total = request.form.get('meta_total', type=int)
+    data_prometida = request.form.get('data_prometida') or None
     
     if not all([num_op, numero_desenho, meta_total]):
         flash('Preencha todos os campos', 'danger')
@@ -1937,8 +1984,8 @@ def pcp_nova():
         flash(f'OP {num_op} já existe', 'danger')
         return redirect(url_for('pcp'))
     
-    query("""INSERT INTO ordens_producao (num_op, numero_desenho, meta_total) VALUES (?, ?, ?)""", 
-          (num_op, numero_desenho, meta_total), commit=True)
+    query("""INSERT INTO ordens_producao (num_op, numero_desenho, meta_total, data_prometida) VALUES (?, ?, ?, ?)""", 
+          (num_op, numero_desenho, meta_total, data_prometida), commit=True)
     
     roteiro = query("""SELECT numero_etapa, descricao_etapa FROM roteiros_padrao 
                         WHERE numero_desenho = ? ORDER BY numero_etapa""", 
@@ -3473,7 +3520,8 @@ def pendencias_count():
     if not session.get('matricula'):
         return jsonify({'count': 0}), 401
     r = query("SELECT COUNT(*) as c FROM apontamentos WHERE status_aprovacao = 'pendente' OR auto_fechado = 1", one=True)
-    return jsonify({'count': r['c'] if r else 0})
+    andon = _andon_ativos() if session.get('papel') == 'supervisor' else []
+    return jsonify({'count': r['c'] if r else 0, 'andon': andon})
 
 MANUAL_TEMPLATE = FASE_TEMPLATE_BASE + """
 <div class="card"><h3>📖 Manual do Sistema</h3>
@@ -3572,8 +3620,10 @@ def _analise_op(op):
                       'parada': parada, 'horas_sem': horas})
     dias = minutos / 60 / HORAS_PRODUTIVAS_DIA
     previsao = agora + timedelta(days=dias) if minutos > 0 else None
+    prometida = _parse_dt(op['data_prometida']) if 'data_prometida' in op.keys() and op['data_prometida'] else None
+    atrasada = bool(prometida and previsao and previsao.date() > prometida.date())
     return {'fases': fases, 'horas_restantes': round(minutos / 60, 1), 'previsao': previsao,
-            'paradas': sum(1 for f in fases if f['parada'])}
+            'paradas': sum(1 for f in fases if f['parada']), 'data_prometida': prometida, 'atrasada': atrasada}
 
 
 ACOMPANHAR_TEMPLATE = FASE_TEMPLATE_BASE + MODAL_CSS + """
@@ -3587,6 +3637,12 @@ ACOMPANHAR_TEMPLATE = FASE_TEMPLATE_BASE + MODAL_CSS + """
     <div class="metric"><div class="v" style="font-size:14px;">{{ op.data_criacao }}</div><div class="l">Criada em</div></div>
     <div class="metric" data-testid="acompanhar-previsao"><div class="v" style="font-size:14px;">{{ analise.previsao.strftime('%d/%m/%Y %H:%M') if analise.previsao else '—' }}</div><div class="l">Previsão de entrega · {{ analise.horas_restantes }}h máq.</div></div>
   </div>
+  <form method="POST" action="/pcp/data_prometida/{{ op.num_op }}" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0;">
+    <label style="font-size:12px;color:#90caf9;">📅 Data prometida ao cliente:</label>
+    <input type="date" name="data_prometida" value="{{ analise.data_prometida.strftime('%Y-%m-%d') if analise.data_prometida else '' }}" data-testid="acompanhar-data-prometida" style="width:auto;">
+    <button class="btn btn-sm btn-info" style="width:auto;padding:5px 10px;" data-testid="acompanhar-salvar-prometida">Salvar</button>
+    {% if analise.atrasada %}<span data-testid="acompanhar-atraso" style="background:#b91c1c;color:#fff;padding:4px 8px;border-radius:4px;font-size:11px;font-weight:700;">⚠ Previsão passa da data prometida</span>{% elif analise.data_prometida %}<span style="color:#10b981;font-size:11px;font-weight:700;">✔ Dentro do prazo</span>{% endif %}
+  </form>
   <small style="color:#78909c;font-size:10px;">Previsão = saldo de cada fase × tempo de ciclo do roteiro, considerando {{ horas_dia }}h produtivas/dia.</small>
   {% if analise.paradas %}<div data-testid="acompanhar-alerta-parada" style="margin-top:10px;padding:10px;border-radius:6px;background:#7f1d1d;color:#fecaca;font-size:12px;font-weight:700;">🛑 {{ analise.paradas }} fase(s) sem apontamento há mais de {{ limite_parada }}h</div>{% endif %}
   <a class="btn btn-sm btn-info" href="/pcp" data-testid="acompanhar-voltar-btn" style="display:inline-block;width:auto;text-decoration:none;margin-top:10px;padding:6px 12px;">← Voltar ao PCP</a>
@@ -3687,6 +3743,131 @@ def pcp_acompanhar(num_op):
             saldo_total=saldo_total, progresso_total=progresso_total, analise=analise,
             limite_parada=LIMITE_FASE_PARADA_H, horas_dia=HORAS_PRODUTIVAS_DIA),
         aba='pcp', session=session)
+
+
+DIAS_UTEIS_SEMANA = 5
+
+
+def _andon_ativos():
+    agora = datetime.now()
+    rows = query("""SELECT p.id, p.codigo_maquina, p.motivo, p.data_hora_inicio, p.operador, o.nome
+        FROM paradas_maquina p LEFT JOIN operadores o ON o.matricula = p.operador
+        WHERE p.status = 'Ativa' ORDER BY p.data_hora_inicio""") or []
+    out = []
+    for r in rows:
+        dt = _parse_dt(r['data_hora_inicio'])
+        out.append({'id': r['id'], 'maquina': r['codigo_maquina'], 'motivo': r['motivo'],
+                    'operador': r['nome'] or r['operador'],
+                    'minutos': int((agora - dt).total_seconds() // 60) if dt else 0})
+    return out
+
+
+def _carga_maquinas():
+    rows = query("""SELECT r.codigo_maquina_padrao as maquina, m.descricao,
+            SUM(e.saldo_residual * COALESCE(r.tempo_ciclo_minutos, 0)) / 60.0 as horas
+        FROM op_etapas_execucao e
+        JOIN ordens_producao o ON o.num_op = e.num_op
+        JOIN roteiros_padrao r ON r.numero_desenho = o.numero_desenho AND r.numero_etapa = e.numero_etapa
+        LEFT JOIN maquinas m ON m.codigo_maquina = r.codigo_maquina_padrao
+        WHERE o.status_geral NOT IN ('Concluída', 'Cancelada') AND e.status_execucao != 'Concluída' AND e.saldo_residual > 0
+        GROUP BY r.codigo_maquina_padrao ORDER BY horas DESC""") or []
+    cap = HORAS_PRODUTIVAS_DIA * DIAS_UTEIS_SEMANA
+    return [{'maquina': r['maquina'], 'descricao': r['descricao'] or '', 'horas': round(r['horas'] or 0, 1),
+             'pct': round((r['horas'] or 0) / cap * 100, 1)} for r in rows]
+
+
+def _oee_hoje(cod):
+    r = query("""SELECT SUM(a.qtd_boas) as boas, SUM(a.refugo) as refugo,
+            SUM((julianday(a.data_hora_fim) - julianday(a.data_hora_inicio)) * 86400) as run_s,
+            AVG(COALESCE(rp.tempo_ciclo_minutos, 1) * 60) as ciclo_s
+        FROM apontamentos a LEFT JOIN ordens_producao o ON o.num_op = a.num_op
+        LEFT JOIN roteiros_padrao rp ON rp.numero_desenho = o.numero_desenho AND rp.numero_etapa = a.numero_etapa
+        WHERE a.codigo_maquina = ? AND a.qtd_boas IS NOT NULL AND DATE(a.data_hora_inicio) = DATE('now')""", (cod,), one=True)
+    run_s = (r['run_s'] or 0) if r else 0
+    if run_s <= 0:
+        return None
+    par = query("""SELECT SUM((julianday(COALESCE(data_hora_fim, datetime('now'))) - julianday(data_hora_inicio)) * 86400) as s
+        FROM paradas_maquina WHERE codigo_maquina = ? AND DATE(data_hora_inicio) = DATE('now')""", (cod,), one=True)
+    stop_s = (par['s'] or 0) if par else 0
+    boas, refugo = r['boas'] or 0, r['refugo'] or 0
+    disp = run_s / (run_s + stop_s)
+    perf = min(1.0, (boas + refugo) * (r['ciclo_s'] or 60) / run_s)
+    qual = boas / ((boas + refugo) or 1)
+    return round(disp * perf * qual * 100, 1)
+
+
+TV_TEMPLATE = """<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="refresh" content="30">
+<title>TV de Produção</title>
+<style>
+body{margin:0;background:#05080f;color:#e2e8f0;font-family:'Segoe UI',Arial,sans-serif;padding:18px}
+h1{margin:0 0 4px;font-size:26px;color:#4fc3f7}.sub{color:#78909c;font-size:13px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+.m{border-radius:12px;padding:16px;background:#0d1b2a;border:2px solid #1a2a3a}
+.m.prod{border-color:#10b981}.m.par{border-color:#ef4444;background:#2a0f12;animation:p 1.4s ease-in-out infinite}
+@keyframes p{50%{opacity:.7}}
+.cod{font-size:28px;font-weight:900}.desc{color:#90a4ae;font-size:13px}
+.st{display:inline-block;margin:8px 0;padding:4px 10px;border-radius:6px;font-weight:800;font-size:14px}
+.prod .st{background:#065f46}.par .st{background:#b91c1c}.livre .st{background:#334155}
+.l{font-size:15px;margin-top:4px}.oee{font-size:34px;font-weight:900;font-family:monospace;margin-top:8px}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap}
+.k{display:flex;gap:10px;flex-wrap:wrap}.k div{background:#0d1b2a;border:1px solid #1a2a3a;border-radius:8px;padding:8px 14px;text-align:center}
+.k b{display:block;font-size:22px}.k span{font-size:11px;color:#78909c}
+</style></head><body data-testid="tv-page">
+<div class="top"><div><h1>📺 Produção em Tempo Real</h1><div class="sub">Atualiza a cada 30 s · {{ agora.strftime('%d/%m/%Y %H:%M') }}</div></div>
+<div class="k"><div><b style="color:#10b981" data-testid="tv-total-prod">{{ cont.prod }}</b><span>Produzindo</span></div>
+<div><b style="color:#ef4444" data-testid="tv-total-par">{{ cont.par }}</b><span>Paradas</span></div>
+<div><b style="color:#94a3b8" data-testid="tv-total-livre">{{ cont.livre }}</b><span>Livres</span></div></div></div>
+<div class="grid">
+{% for m in maquinas %}
+<div class="m {{ m.classe }}" data-testid="tv-maquina-{{ m.codigo }}">
+  <div class="cod">{{ m.codigo }}</div><div class="desc">{{ m.descricao }}</div>
+  <div class="st">{{ m.status }}</div>
+  {% if m.parada %}<div class="l">🚨 {{ m.parada.motivo }} · <b>{{ m.parada.minutos }} min</b></div><div class="l">👤 {{ m.parada.operador }}</div>{% endif %}
+  {% if m.ap %}<div class="l">📋 {{ m.ap.num_op }} · Etapa {{ m.ap.numero_etapa }}</div><div class="l">👤 {{ m.ap.nome or m.ap.operador }} · ⏱ {{ m.ap.minutos }} min</div>{% endif %}
+  <div class="oee" style="color:{{ '#78909c' if m.oee is none else ('#10b981' if m.oee >= 75 else ('#f59e0b' if m.oee >= 50 else '#ef4444')) }}">{{ '—' if m.oee is none else m.oee ~ '%' }}</div><div class="desc">OEE de hoje</div>
+</div>
+{% endfor %}
+</div></body></html>"""
+
+
+@app.route('/pcp/tv')
+@login_required
+def pcp_tv():
+    agora = datetime.now()
+    andon = {}
+    for p in _andon_ativos():
+        if p['maquina']:
+            andon.setdefault(p['maquina'], p)
+    ativos = {}
+    for a in query("""SELECT a.*, o.nome FROM apontamentos a LEFT JOIN operadores o ON o.matricula = a.operador
+            WHERE a.qtd_boas IS NULL AND a.status = 'Ativo' ORDER BY a.data_hora_inicio""") or []:
+        dt = _parse_dt(a['data_hora_inicio'])
+        ativos.setdefault(a['codigo_maquina'], {'num_op': a['num_op'], 'numero_etapa': a['numero_etapa'],
+            'operador': a['operador'], 'nome': a['nome'], 'minutos': int((agora - dt).total_seconds() // 60) if dt else 0})
+    maquinas, cont = [], {'prod': 0, 'par': 0, 'livre': 0}
+    for m in query("SELECT * FROM maquinas WHERE status_operacional = 'Ativa' ORDER BY codigo_maquina") or []:
+        cod = m['codigo_maquina']
+        if cod in andon:
+            classe, status = 'par', '🔴 PARADA'
+        elif cod in ativos:
+            classe, status = 'prod', '🟢 PRODUZINDO'
+        else:
+            classe, status = 'livre', '⚪ LIVRE'
+        cont[classe] += 1
+        maquinas.append({'codigo': cod, 'descricao': m['descricao'], 'classe': classe, 'status': status,
+                         'parada': andon.get(cod), 'ap': ativos.get(cod), 'oee': _oee_hoje(cod)})
+    return render_template_string(TV_TEMPLATE, maquinas=maquinas, cont=cont, agora=agora)
+
+
+@app.route('/pcp/data_prometida/<num_op>', methods=['POST'])
+@login_required
+def pcp_data_prometida(num_op):
+    valor = request.form.get('data_prometida') or None
+    query("UPDATE ordens_producao SET data_prometida = ? WHERE num_op = ?", (valor, num_op), commit=True)
+    log_audit('data_prometida', 'op', num_op, valor or 'removida')
+    flash('📅 Data prometida atualizada', 'success')
+    return redirect(url_for('pcp_acompanhar', num_op=num_op))
 
 
 if __name__ == '__main__':
